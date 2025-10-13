@@ -178,6 +178,115 @@ test("at returns the nth document respecting filters", async () => {
   await db.close();
 });
 
+test("encryption stores ciphertext on disk and decrypts on load", async () => {
+  const tempDir = await createTempDir();
+  const secret = "bench-secret";
+  const db = await JsonDatabase.open({ path: tempDir, autosave: false });
+
+  const users = db.collection("users", {
+    encryption: {
+      secret,
+      fields: ["password"],
+    },
+  });
+
+  await users.insertOne({ email: "user@example.com", password: "p@ss" });
+  await db.save();
+
+  const stored = await fs.readFile(
+    path.join(tempDir, "collections", "users.collection.json"),
+    "utf8",
+  );
+  const payload = JSON.parse(stored);
+  const encryptedPassword = payload.documents[0].password;
+  assert.equal(encryptedPassword.__jsonvaultEncrypted, true);
+
+  await db.close();
+
+  const reopened = await JsonDatabase.open({ path: tempDir, autosave: false });
+  const reopenedUsers = reopened.collection("users", {
+    encryption: {
+      secret,
+      fields: ["password"],
+    },
+  });
+
+  const doc = await reopenedUsers.findOne({ email: "user@example.com" });
+  assert.equal(doc.password, "p@ss");
+
+  await reopened.close();
+});
+
+test("partitioned collection writes chunk files", async () => {
+  const tempDir = await createTempDir();
+  const db = await JsonDatabase.open({ path: tempDir, autosave: false });
+  const logs = db.collection("logs", {
+    partition: { chunkSize: 5, key: "idx" },
+  });
+
+  const docs = Array.from({ length: 12 }, (_, idx) => ({ idx }));
+  await logs.insertMany(docs);
+  await db.save();
+  await db.close();
+
+  const chunksDir = path.join(tempDir, "collections", "logs.chunks");
+  const files = await fs.readdir(chunksDir);
+  assert.equal(files.length, 3);
+
+  const mainFile = await fs.readFile(
+    path.join(tempDir, "collections", "logs.collection.json"),
+    "utf8",
+  );
+  const payload = JSON.parse(mainFile);
+  assert.equal(payload.documents.length, 0);
+  assert.equal(payload.chunks.length, 3);
+
+  const chunkOne = await fs.readFile(path.join(chunksDir, files[0]), "utf8");
+  const parsedChunk = JSON.parse(chunkOne);
+  assert.equal(parsedChunk.length, 5);
+
+  const reopen = await JsonDatabase.open({ path: tempDir, autosave: false });
+  const reopenedLogs = reopen.collection("logs", {
+    partition: { chunkSize: 5, key: "idx" },
+  });
+  const count = await reopenedLogs.count();
+  assert.equal(count, 12);
+
+  const plan = reopenedLogs.explain({ idx: { $lt: 5 } });
+  assert.ok(plan);
+  assert.equal(plan.optimized, true);
+  assert.equal(plan.scannedChunks, 1);
+  const allPlan = reopenedLogs.explain({});
+  assert.ok(allPlan);
+  assert.equal(allPlan.optimized, false);
+
+  await reopen.close();
+});
+
+test("watch emits change events", async () => {
+  const tempDir = await createTempDir();
+  const db = await JsonDatabase.open({ path: tempDir, autosave: false });
+  const events = [];
+  const handle = db.watch("users/**");
+  handle.on("change", (event) => events.push(event));
+
+  const users = db.collection("users");
+  const inserted = await users.insertOne({ name: "Watcher" });
+  await users.updateOne({ _id: inserted._id }, { $set: { name: "Updated" } });
+  await users.deleteOne({ _id: inserted._id });
+
+  handle.close();
+  await db.close();
+
+  assert.equal(events.length, 3);
+  assert.equal(events[0].type, "insert");
+  assert.equal(events[0].documents[0]._id, inserted._id);
+  assert.equal(events[1].type, "update");
+  assert.equal(events[1].updates[0].next.name, "Updated");
+  assert.equal(events[2].type, "delete");
+  assert.equal(events[2].deleted[0]._id, inserted._id);
+});
+
 test("schema validation applies defaults and rejects invalid docs", async () => {
   const tempDir = await createTempDir();
   const db = await JsonDatabase.open({ path: tempDir, autosave: false });

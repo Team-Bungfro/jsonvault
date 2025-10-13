@@ -11,6 +11,7 @@ const { queryDocuments } = require("./query/queryEngine");
 const { matchFilter } = require("./query/operators");
 const IndexManager = require("./indexing/indexManager");
 const { createSchema } = require("./schema/schema");
+const { createFieldEncryption } = require("./encryption/fieldEncryption");
 
 const asyncMaybe = async (fn, payload) => {
   if (typeof fn !== "function") {
@@ -188,6 +189,230 @@ const applyUpdate = (doc, update, primaryKey) => {
   return next;
 };
 
+const coercePartitionValue = (value) => {
+  if (value instanceof Date) {
+    return value.getTime();
+  }
+  if (typeof value === "number") {
+    return Number.isFinite(value) ? value : null;
+  }
+  if (typeof value === "string") {
+    const parsed = Number(value);
+    return Number.isNaN(parsed) ? null : parsed;
+  }
+  return null;
+};
+
+const selectGreaterLower = (aValue, aExclusive, bValue, bExclusive) => {
+  if (aValue == null) {
+    return { value: bValue, exclusive: bExclusive };
+  }
+  if (bValue == null) {
+    return { value: aValue, exclusive: aExclusive };
+  }
+  if (aValue > bValue) {
+    return { value: aValue, exclusive: aExclusive };
+  }
+  if (bValue > aValue) {
+    return { value: bValue, exclusive: bExclusive };
+  }
+  return { value: aValue, exclusive: aExclusive || bExclusive };
+};
+
+const selectSmallerUpper = (aValue, aExclusive, bValue, bExclusive) => {
+  if (aValue == null) {
+    return { value: bValue, exclusive: bExclusive };
+  }
+  if (bValue == null) {
+    return { value: aValue, exclusive: aExclusive };
+  }
+  if (aValue < bValue) {
+    return { value: aValue, exclusive: aExclusive };
+  }
+  if (bValue < aValue) {
+    return { value: bValue, exclusive: bExclusive };
+  }
+  return { value: aValue, exclusive: aExclusive || bExclusive };
+};
+
+const intersectRanges = (lhs, rhs) => {
+  if (!lhs) {
+    return rhs ? { ...rhs } : null;
+  }
+  if (!rhs) {
+    return lhs ? { ...lhs } : null;
+  }
+
+  const lower = selectGreaterLower(lhs.min, lhs.minExclusive, rhs.min, rhs.minExclusive);
+  const upper = selectSmallerUpper(lhs.max, lhs.maxExclusive, rhs.max, rhs.maxExclusive);
+
+  if (lower.value != null && upper.value != null) {
+    if (lower.value > upper.value) {
+      return null;
+    }
+    if (lower.value === upper.value && (lower.exclusive || upper.exclusive)) {
+      return null;
+    }
+  }
+
+  return {
+    min: lower.value,
+    minExclusive: Boolean(lower.value != null && lower.exclusive),
+    max: upper.value,
+    maxExclusive: Boolean(upper.value != null && upper.exclusive),
+  };
+};
+
+const parseRangeNode = (node) => {
+  if (node == null) {
+    return null;
+  }
+
+  if (Array.isArray(node)) {
+    const values = node
+      .map((value) => coercePartitionValue(value))
+      .filter((value) => value != null);
+    if (values.length === 0) {
+      return null;
+    }
+    const min = Math.min(...values);
+    const max = Math.max(...values);
+    return {
+      min,
+      max,
+      minExclusive: false,
+      maxExclusive: false,
+    };
+  }
+
+  if (typeof node !== "object") {
+    const value = coercePartitionValue(node);
+    if (value == null) {
+      return null;
+    }
+    return {
+      min: value,
+      max: value,
+      minExclusive: false,
+      maxExclusive: false,
+    };
+  }
+
+  if (node.$eq !== undefined) {
+    const value = coercePartitionValue(node.$eq);
+    if (value == null) {
+      return null;
+    }
+    return {
+      min: value,
+      max: value,
+      minExclusive: false,
+      maxExclusive: false,
+    };
+  }
+
+  if (node.$in) {
+    const values = node.$in
+      .map((value) => coercePartitionValue(value))
+      .filter((value) => value != null);
+    if (values.length === 0) {
+      return null;
+    }
+    const min = Math.min(...values);
+    const max = Math.max(...values);
+    return {
+      min,
+      max,
+      minExclusive: false,
+      maxExclusive: false,
+    };
+  }
+
+  let range = null;
+
+  if (node.$gte !== undefined) {
+    const value = coercePartitionValue(node.$gte);
+    if (value == null) {
+      return null;
+    }
+    range = intersectRanges(range, {
+      min: value,
+      minExclusive: false,
+      max: null,
+      maxExclusive: false,
+    });
+  }
+
+  if (node.$gt !== undefined) {
+    const value = coercePartitionValue(node.$gt);
+    if (value == null) {
+      return null;
+    }
+    range = intersectRanges(range, {
+      min: value,
+      minExclusive: true,
+      max: null,
+      maxExclusive: false,
+    });
+  }
+
+  if (node.$lte !== undefined) {
+    const value = coercePartitionValue(node.$lte);
+    if (value == null) {
+      return null;
+    }
+    range = intersectRanges(range, {
+      min: null,
+      minExclusive: false,
+      max: value,
+      maxExclusive: false,
+    });
+  }
+
+  if (node.$lt !== undefined) {
+    const value = coercePartitionValue(node.$lt);
+    if (value == null) {
+      return null;
+    }
+    range = intersectRanges(range, {
+      min: null,
+      minExclusive: false,
+      max: value,
+      maxExclusive: true,
+    });
+  }
+
+  return range;
+};
+
+const extractRangeForKey = (filter, keyPath) => {
+  if (!filter || typeof filter !== "object") {
+    return null;
+  }
+
+  const direct = getByPath(filter, keyPath);
+  if (direct !== undefined) {
+    return parseRangeNode(direct);
+  }
+
+  if (Array.isArray(filter.$and)) {
+    let combined = null;
+    for (const clause of filter.$and) {
+      const nextRange = extractRangeForKey(clause, keyPath);
+      if (!nextRange) {
+        continue;
+      }
+      combined = intersectRanges(combined, nextRange);
+      if (!combined) {
+        return null;
+      }
+    }
+    return combined;
+  }
+
+  return null;
+};
+
 class JsonCollection {
   constructor(config) {
     const persistedOptions = config.options || {};
@@ -198,9 +423,8 @@ class JsonCollection {
       primaryKey: this._primaryKey,
       capped: Boolean(persistedOptions.capped),
       maxSize: persistedOptions.maxSize || null,
+      partition: persistedOptions.partition || null,
     };
-
-    this.setSchema(config.runtime?.schema);
 
     this._runtime = {
       validator: config.runtime?.validator,
@@ -210,6 +434,18 @@ class JsonCollection {
     this._documents = [];
     this._byId = new Map();
     this._indexes = new IndexManager(this._name);
+
+    this._schema = null;
+    this._encryption = null;
+    this._partition = this._options.partition || null;
+    this._partitionChunkCache = null;
+    this._version = 0;
+
+    this.setSchema(config.runtime?.schema);
+    if (config.runtime && Object.prototype.hasOwnProperty.call(config.runtime, "partition")) {
+      this.setPartition(config.runtime.partition);
+    }
+    this.setEncryption(config.runtime?.encryption);
     this.hydrateFromSnapshot(
       config.documents || [],
       config.indexes || {},
@@ -234,7 +470,7 @@ class JsonCollection {
       name: this._name,
       options: this._options,
       indexes: this._indexes.toJSON(),
-      documents: this._documents,
+      documents: this._documents.map((doc) => this._serializeDocument(doc)),
     };
   }
 
@@ -262,6 +498,7 @@ class JsonCollection {
     this._byId.set(id, incoming);
     this._indexes.indexDocument(incoming);
 
+    const cappedRemovals = [];
     if (this._options.capped && this._options.maxSize && this._documents.length > this._options.maxSize) {
       const overflow = this._documents.length - this._options.maxSize;
       for (let i = 0; i < overflow; i += 1) {
@@ -270,19 +507,35 @@ class JsonCollection {
           continue;
         }
 
-        const removedId = removed[this._primaryKey];
-        await asyncMaybe(this._runtime.hooks.beforeDelete, cloneDeep(removed));
+        const removedClone = cloneDeep(removed);
+        const removedId = removedClone[this._primaryKey];
+        await asyncMaybe(this._runtime.hooks.beforeDelete, removedClone);
         this._byId.delete(removedId);
         this._indexes.unindexDocument(removed);
-        await asyncMaybe(this._runtime.hooks.afterDelete, cloneDeep(removed));
+        cappedRemovals.push(removedClone);
+        await asyncMaybe(this._runtime.hooks.afterDelete, cloneDeep(removedClone));
       }
     }
 
-    await this._database._notifyChange(this);
+    const result = cloneDeep(incoming);
+    await asyncMaybe(this._runtime.hooks.afterInsert, cloneDeep(result));
 
-    await asyncMaybe(this._runtime.hooks.afterInsert, cloneDeep(incoming));
+    this._invalidatePartitionCache();
 
-    return cloneDeep(incoming);
+    await this._database._notifyChange(this, {
+      type: "insert",
+      documents: [cloneDeep(result)],
+    });
+
+    if (cappedRemovals.length > 0) {
+      await this._database._notifyChange(this, {
+        type: "delete",
+        deleted: cappedRemovals.map((doc) => cloneDeep(doc)),
+        reason: "capped",
+      });
+    }
+
+    return result;
   }
 
   async insertMany(documents, options = {}) {
@@ -296,7 +549,8 @@ class JsonCollection {
 
   async find(filter = {}, options = {}) {
     const candidates = this._indexes.candidatesForFilter(filter);
-    let docs = this._documents;
+    let docs;
+    let plan = null;
 
     if (candidates) {
       docs = [];
@@ -308,7 +562,19 @@ class JsonCollection {
       }
     }
 
+    if (!docs) {
+      const selection = this._getDocsForFilter(filter);
+      docs = selection.docs;
+      plan = selection.plan;
+    }
+
     const results = queryDocuments(docs, filter, options);
+    if (plan) {
+      plan.matched = results.length;
+      this._lastPlan = { ...plan };
+    } else {
+      this._lastPlan = null;
+    }
     return results.map((doc) => cloneDeep(doc));
   }
 
@@ -345,6 +611,7 @@ class JsonCollection {
     const matches = await this.find(filter, { projection: null });
     let matchedCount = 0;
     let modifiedCount = 0;
+    const updates = [];
 
     for (const match of matches) {
       const id = match[this._primaryKey];
@@ -376,9 +643,14 @@ class JsonCollection {
       this._indexes.updateDocument(previousSnapshot, next);
 
       matchedCount += 1;
-      modifiedCount += JSON.stringify(previousSnapshot) === JSON.stringify(next)
-        ? 0
-        : 1;
+      const changed = JSON.stringify(previousSnapshot) !== JSON.stringify(next);
+      if (changed) {
+        modifiedCount += 1;
+        updates.push({
+          previous: cloneDeep(previousSnapshot),
+          next: cloneDeep(next),
+        });
+      }
 
       await asyncMaybe(this._runtime.hooks.afterUpdate, {
         previous: previousSnapshot,
@@ -399,8 +671,13 @@ class JsonCollection {
       return { matchedCount, modifiedCount, upsertedId: inserted[this._primaryKey] };
     }
 
-    if (modifiedCount > 0) {
-      await this._database._notifyChange(this);
+    if (updates.length > 0) {
+      this._invalidatePartitionCache();
+      await this._database._notifyChange(this, {
+        type: "update",
+        updates,
+        documents: updates.map((entry) => cloneDeep(entry.next)),
+      });
     }
 
     return { matchedCount, modifiedCount };
@@ -457,12 +734,14 @@ class JsonCollection {
   async deleteMany(filter = {}) {
     const matches = await this.find(filter);
     let deletedCount = 0;
+    const deletedDocs = [];
 
     for (const match of matches) {
       const id = match[this._primaryKey];
       const current = this._byId.get(id);
+      const snapshot = cloneDeep(current);
 
-      await asyncMaybe(this._runtime.hooks.beforeDelete, cloneDeep(current));
+      await asyncMaybe(this._runtime.hooks.beforeDelete, cloneDeep(snapshot));
 
       this._byId.delete(id);
       this._indexes.unindexDocument(current);
@@ -473,12 +752,17 @@ class JsonCollection {
       }
 
       deletedCount += 1;
+      deletedDocs.push(snapshot);
 
-      await asyncMaybe(this._runtime.hooks.afterDelete, cloneDeep(current));
+      await asyncMaybe(this._runtime.hooks.afterDelete, cloneDeep(snapshot));
     }
 
     if (deletedCount > 0) {
-      await this._database._notifyChange(this);
+      this._invalidatePartitionCache();
+      await this._database._notifyChange(this, {
+        type: "delete",
+        deleted: deletedDocs.map((doc) => cloneDeep(doc)),
+      });
     }
 
     return { deletedCount };
@@ -532,12 +816,21 @@ class JsonCollection {
   async ensureIndex(field, options = {}) {
     this._indexes.ensureIndex(field, options);
     this._indexes.rebuild(this._documents);
-    await this._database._notifyChange(this);
+    await this._database._notifyChange(this, {
+      type: "index",
+      action: "ensure",
+      field,
+      options,
+    });
   }
 
   async dropIndex(field) {
     this._indexes.dropIndex(field);
-    await this._database._notifyChange(this);
+    await this._database._notifyChange(this, {
+      type: "index",
+      action: "drop",
+      field,
+    });
   }
 
   getStats() {
@@ -565,7 +858,9 @@ class JsonCollection {
     this._indexes = new IndexManager(this._name);
     this._indexes.loadFromSnapshot(indexes);
 
-    for (const doc of documents) {
+    const incoming = (documents || []).map((doc) => this._deserializeDocument(doc));
+
+    for (const doc of incoming) {
       const clone = cloneDeep(doc);
       if (!Object.prototype.hasOwnProperty.call(clone, this._primaryKey)) {
         clone[this._primaryKey] = generateId();
@@ -575,6 +870,8 @@ class JsonCollection {
     }
 
     this._indexes.rebuild(this._documents);
+    this._partition = this._options.partition || null;
+    this._invalidatePartitionCache();
   }
 
   async _purgeExpiredDocuments(now = Date.now()) {
@@ -619,6 +916,258 @@ class JsonCollection {
       typeof schemaDefinition.validate === "function"
         ? schemaDefinition
         : createSchema(schemaDefinition);
+  }
+
+  setPartition(partitionConfig) {
+    if (!partitionConfig) {
+      this._partition = null;
+      this._options.partition = null;
+      this._invalidatePartitionCache();
+      return;
+    }
+
+    const chunkSize = Number(partitionConfig.chunkSize);
+    if (!Number.isFinite(chunkSize) || chunkSize <= 0) {
+      throw new Error("partition.chunkSize must be a positive number");
+    }
+
+    const key = typeof partitionConfig.key === "string" && partitionConfig.key.length > 0
+      ? partitionConfig.key
+      : null;
+
+    const normalized = {
+      chunkSize: Math.floor(chunkSize),
+      strategy: partitionConfig.strategy || "chunk",
+      key,
+    };
+
+    this._partition = normalized;
+    this._options.partition = normalized;
+    this._invalidatePartitionCache();
+  }
+
+  _getPartitionChunks() {
+    if (!this._partition || !this._partition.chunkSize) {
+      return null;
+    }
+
+    if (
+      this._partitionChunkCache &&
+      this._partitionChunkCache.version === this._version
+    ) {
+      return this._partitionChunkCache.chunks;
+    }
+
+    const chunks = [];
+    const chunkSize = this._partition.chunkSize;
+    const keyPath = this._partition.key;
+
+    let offset = 0;
+    while (offset < this._documents.length) {
+      const end = Math.min(offset + chunkSize, this._documents.length);
+      const slice = this._documents.slice(offset, end);
+
+      let min = null;
+      let max = null;
+
+      if (keyPath) {
+        for (const doc of slice) {
+          const value = coercePartitionValue(getByPath(doc, keyPath));
+          if (value == null) {
+            continue;
+          }
+          if (min === null || value < min) {
+            min = value;
+          }
+          if (max === null || value > max) {
+            max = value;
+          }
+        }
+      }
+
+      chunks.push({
+        start: offset,
+        end,
+        count: slice.length,
+        min,
+        max,
+      });
+
+      offset = end;
+    }
+
+    this._partitionChunkCache = {
+      version: this._version,
+      chunks,
+    };
+
+    return chunks;
+  }
+
+  _chunkOverlaps(range, chunk) {
+    if (chunk.count === 0) {
+      return false;
+    }
+
+    if (range.min != null) {
+      if (chunk.max == null) {
+        // cannot determine, assume overlap
+      } else if (range.minExclusive) {
+        if (chunk.max <= range.min) {
+          return false;
+        }
+      } else if (chunk.max < range.min) {
+        return false;
+      }
+    }
+
+    if (range.max != null) {
+      if (chunk.min == null) {
+        // assume overlap
+      } else if (range.maxExclusive) {
+        if (chunk.min >= range.max) {
+          return false;
+        }
+      } else if (chunk.min > range.max) {
+        return false;
+      }
+    }
+
+    return true;
+  }
+
+  _planPartition(filter = {}) {
+    if (!this._partition || !this._partition.chunkSize || !this._partition.key) {
+      return null;
+    }
+
+    const chunks = this._getPartitionChunks() || [];
+    const totalChunks = chunks.length;
+    const totalDocs = this._documents.length;
+
+    if (totalChunks === 0) {
+      return {
+        optimized: false,
+        key: this._partition.key,
+        range: null,
+        totalChunks,
+        scannedChunks: 0,
+        documentsScanned: 0,
+        chunks: [],
+      };
+    }
+
+    const range = extractRangeForKey(filter, this._partition.key);
+    if (!range) {
+      return {
+        optimized: false,
+        key: this._partition.key,
+        range: null,
+        totalChunks,
+        scannedChunks: totalChunks,
+        documentsScanned: totalDocs,
+        chunks,
+      };
+    }
+
+    const selected = [];
+    for (const chunk of chunks) {
+      if (chunk.min == null || chunk.max == null) {
+        selected.push(chunk);
+        continue;
+      }
+      if (this._chunkOverlaps(range, chunk)) {
+        selected.push(chunk);
+      }
+    }
+
+    const documentsScanned = selected.reduce((sum, chunk) => sum + chunk.count, 0);
+
+    return {
+      optimized: selected.length < chunks.length,
+      key: this._partition.key,
+      range,
+      totalChunks,
+      scannedChunks: selected.length,
+      documentsScanned,
+      chunks: selected,
+    };
+  }
+
+  _getDocsForFilter(filter = {}) {
+    const plan = this._planPartition(filter);
+    if (!plan || !plan.optimized) {
+      return { docs: this._documents, plan };
+    }
+
+    if (plan.chunks.length === 0) {
+      return { docs: [], plan };
+    }
+
+    const subset = [];
+    for (const chunk of plan.chunks) {
+      subset.push(...this._documents.slice(chunk.start, chunk.end));
+    }
+
+    return { docs: subset, plan };
+  }
+
+  explain(filter = {}) {
+    return this._planPartition(filter);
+  }
+
+  _serializeDocument(doc) {
+    if (!this._encryption) {
+      return cloneDeep(doc);
+    }
+
+    return this._encryption.encryptDocument(doc);
+  }
+
+  _deserializeDocument(doc) {
+    if (!this._encryption) {
+      return cloneDeep(doc);
+    }
+
+    try {
+      return this._encryption.decryptDocument(doc);
+    } catch (error) {
+      throw new Error(
+        `Failed to decrypt document in collection "${this._name}": ${error.message}`,
+      );
+    }
+  }
+
+  _invalidatePartitionCache() {
+    this._partitionChunkCache = null;
+    this._version += 1;
+  }
+
+  setEncryption(encryptionConfig) {
+    if (!encryptionConfig) {
+      this._encryption = null;
+      this._invalidatePartitionCache();
+      return;
+    }
+
+    this._encryption = createFieldEncryption(encryptionConfig);
+
+    if (this._documents.length > 0) {
+      const nextDocuments = [];
+      const nextById = new Map();
+
+      for (const doc of this._documents) {
+        const decrypted = this._encryption.decryptDocument(doc);
+        nextDocuments.push(decrypted);
+        nextById.set(decrypted[this._primaryKey], decrypted);
+      }
+
+      this._documents = nextDocuments;
+      this._byId = nextById;
+      this._indexes.rebuild(this._documents);
+    }
+
+    this._invalidatePartitionCache();
   }
 }
 

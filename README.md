@@ -10,6 +10,8 @@ jsonvault is a JSON document database for Node and Bun. It keeps data in plain f
 - Maintains secondary indexes with optional uniqueness checks.
 - Supports TTL indexes that remove expired documents without manual cleanup.
 - Offers declarative schemas with defaults, nested rules, and custom validators.
+- Supports optional field-level encryption and chunked storage for large collections.
+- Streams change events via `db.watch()` for reactive workflows.
 - Offers autosave, manual `save()` and `backup()` methods, and a simple transaction helper built on in-memory snapshots.
 - Ships with hooks and an optional validator so you can plug in your own logic.
 - Includes TypeScript definitions.
@@ -75,6 +77,35 @@ const firstPost = await posts.at(0);
 console.log(firstPost?.title);
 ```
 
+## CLI
+
+```sh
+npx jsonvault list ./data
+npx jsonvault stats ./data
+npx jsonvault dump ./data users --limit=5 --filter='{"active":true}'
+npx jsonvault export ./data users --format=csv --out=users.csv
+```
+
+The CLI reads the database directory on disk, so set the path to the folder that holds `meta.json` and `collections/`.
+
+## Watching changes
+
+```js
+const db = await JsonDatabase.open({ path: "./data" });
+
+const subscription = db.watch("users/**");
+subscription.on("change", (event) => {
+  console.log(event.type, event.collection, event.paths);
+});
+
+const users = db.collection("users");
+await users.insertOne({ name: "Watcher Test" });
+
+// remember to clean up when you're done
+subscription.close();
+await db.close();
+```
+
 ## Schemas
 
 ```js
@@ -114,6 +145,50 @@ await users.insertOne({ name: "B", email: "broken" });
 ```
 
 Schemas run before custom validators and hooks, so you can combine them when you need extra checks.
+
+## Field encryption
+
+```js
+const db = await JsonDatabase.open({ path: "./data" });
+
+const users = db.collection("users", {
+  encryption: {
+    secret: process.env.JSONVAULT_SECRET,
+    fields: ["password", "tokens.refresh"],
+  },
+});
+
+await users.insertOne({
+  email: "encrypted@example.com",
+  password: "p@ssw0rd",
+  tokens: { refresh: "secret-refresh-token" },
+});
+
+await db.save();
+```
+
+Encrypted fields are stored as ciphertext on disk but stay readable in memory, so queries work as usual. Reopen the database with the same `encryption.secret` to decrypt documents automatically.
+
+## Partitioning large collections
+
+```js
+const logs = db.collection("logs", {
+  partition: {
+    chunkSize: 10_000,
+    key: "ts",
+  },
+});
+
+await logs.insertMany(events);
+await db.save();
+
+const plan = logs.explain({ ts: { $lt: Date.now() - 1_000 } });
+console.log(plan.scannedChunks, "chunks scanned");
+```
+
+When `chunkSize` is set, jsonvault writes collection data in chunk files (for example `logs.chunk-0001.json`). This keeps large collections manageable and speeds up incremental rewrites. Run `await db.save()` or `await db.compact()` periodically to rewrite stale chunks.
+
+Add `key` when you want range filters to scan fewer chunks. See `examples/partition-demo.js` for a complete script that generates partitioned data and prints the resulting chunk files.
 
 ## Indexes
 

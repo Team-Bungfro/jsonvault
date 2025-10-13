@@ -1,9 +1,12 @@
 {
   "name": "jsonvault",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Advanced, easy-to-use JSON document database for Node.js and Bun projects.",
   "license": "MIT",
   "type": "commonjs",
+  "bin": {
+    "jsonvault": "bin/jsonvault.js"
+  },
   "main": "src/index.js",
   "exports": {
     ".": {
@@ -15,6 +18,7 @@
   },
   "types": "types/index.d.ts",
   "files": [
+    "bin",
     "src",
     "types",
     "examples",

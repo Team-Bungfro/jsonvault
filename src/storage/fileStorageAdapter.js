@@ -4,6 +4,8 @@ const fs = require("fs/promises");
 const path = require("path");
 const os = require("os");
 
+const { getByPath } = require("../utils/objectUtils");
+
 const DEFAULT_META = {
   version: 1,
   createdAt: null,
@@ -22,6 +24,30 @@ const atomicWriteFile = async (targetPath, payload) => {
 
   await fs.writeFile(tempFile, payload, "utf8");
   await fs.rename(tempFile, targetPath);
+};
+
+const removeDirIfExists = async (dir) => {
+  try {
+    await fs.rm(dir, { recursive: true, force: true });
+  } catch (error) {
+    if (error.code !== "ENOENT") {
+      throw error;
+    }
+  }
+};
+
+const coerceRangeValue = (value) => {
+  if (value instanceof Date) {
+    return value.getTime();
+  }
+  if (typeof value === "number") {
+    return Number.isFinite(value) ? value : null;
+  }
+  if (typeof value === "string") {
+    const parsed = Number(value);
+    return Number.isNaN(parsed) ? null : parsed;
+  }
+  return null;
 };
 
 class FileStorageAdapter {
@@ -88,15 +114,38 @@ class FileStorageAdapter {
     return path.join(this.collectionsDir, `${name}.collection.json`);
   }
 
+  chunkDirectory(name) {
+    return path.join(this.collectionsDir, `${name}.chunks`);
+  }
+
   async readCollection(name) {
     const filePath = this.collectionPath(name);
 
     try {
       const payload = await fs.readFile(filePath, "utf8");
       const parsed = JSON.parse(payload);
+
+      let documents = parsed.documents || [];
+      if (!documents.length && Array.isArray(parsed.chunks) && parsed.chunks.length > 0) {
+        const chunkDir = this.chunkDirectory(name);
+        documents = [];
+        for (const chunk of parsed.chunks) {
+          const chunkPath = path.join(chunkDir, chunk.file);
+          try {
+            const raw = await fs.readFile(chunkPath, "utf8");
+            documents.push(...JSON.parse(raw));
+          } catch (error) {
+            if (error.code === "ENOENT") {
+              continue;
+            }
+            throw error;
+          }
+        }
+      }
+
       return {
         name: parsed.name,
-        documents: parsed.documents || [],
+        documents,
         indexes: parsed.indexes || {},
         options: parsed.options || {},
       };
@@ -115,11 +164,60 @@ class FileStorageAdapter {
 
   async writeCollection(name, payload) {
     const filePath = this.collectionPath(name);
+    const chunkDir = this.chunkDirectory(name);
+    const documents = payload.documents || [];
+    const options = payload.options || {};
+    const partition = options.partition || null;
+
+    let chunksMeta = null;
+
+    if (partition && partition.chunkSize && documents.length > partition.chunkSize) {
+      await removeDirIfExists(chunkDir);
+      await ensureDir(chunkDir);
+
+      chunksMeta = [];
+      let index = 0;
+      let offset = 0;
+      while (offset < documents.length) {
+        const slice = documents.slice(offset, offset + partition.chunkSize);
+        index += 1;
+        const file = `${name}.chunk-${String(index).padStart(4, "0")}.json`;
+        const chunkPath = path.join(chunkDir, file);
+        await atomicWriteFile(chunkPath, JSON.stringify(slice, null, 2));
+
+        let min = null;
+        let max = null;
+        if (partition.key) {
+          for (const doc of slice) {
+            const value = coerceRangeValue(getByPath(doc, partition.key));
+            if (value == null) {
+              continue;
+            }
+            if (min === null || value < min) {
+              min = value;
+            }
+            if (max === null || value > max) {
+              max = value;
+            }
+          }
+        }
+
+        const start = offset;
+        const end = offset + slice.length;
+        chunksMeta.push({ file, count: slice.length, start, end, min, max });
+        offset = end;
+      }
+    } else {
+      // remove old chunk files if they exist
+      await removeDirIfExists(chunkDir);
+    }
+
     const wrapped = {
       name,
-      documents: payload.documents || [],
+      documents: chunksMeta ? [] : documents,
       indexes: payload.indexes || {},
-      options: payload.options || {},
+      options,
+      chunks: chunksMeta,
     };
 
     await atomicWriteFile(filePath, JSON.stringify(wrapped, null, 2));
