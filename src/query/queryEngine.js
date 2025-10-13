@@ -2,6 +2,12 @@
 
 const { cloneDeep, getByPath } = require("../utils/objectUtils");
 const { compareValues, matchFilter } = require("./operators");
+const Sort = {
+  ASC: 1,
+  DESC: -1,
+  ASCENDING: 1,
+  DESCENDING: -1,
+};
 
 const includeField = (target, path, value) => {
   const segments = path.split(".");
@@ -63,12 +69,26 @@ const projectDocument = (doc, projection) => {
   return output;
 };
 
+const normalizeDirection = (value) => {
+  if (value === Sort.ASC || value === Sort.ASCENDING || value === 1 || value === "asc") {
+    return 1;
+  }
+  if (value === Sort.DESC || value === Sort.DESCENDING || value === -1 || value === "desc") {
+    return -1;
+  }
+
+  throw new Error(`Unsupported sort direction: ${value}`);
+};
+
 const applySort = (docs, sortSpec) => {
   if (!sortSpec || Object.keys(sortSpec).length === 0) {
     return docs;
   }
 
-  const sortEntries = Object.entries(sortSpec);
+  const sortEntries = Object.entries(sortSpec).map(([field, direction]) => [
+    field,
+    normalizeDirection(direction),
+  ]);
   const sorted = [...docs];
 
   sorted.sort((a, b) => {
@@ -146,4 +166,5 @@ module.exports = {
   queryDocuments,
   projectDocument,
   applySort,
+  Sort,
 };

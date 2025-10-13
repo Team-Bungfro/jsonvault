@@ -36,9 +36,14 @@ export interface Projection {
 
 export type SortDirection = 1 | -1;
 
+export enum SortEnum {
+  ASC = 1,
+  DESC = -1,
+}
+
 export type SortSpec<T extends Record<string, any> = Record<string, any>> =
-  Partial<Record<keyof T, SortDirection>> & {
-    [path: string]: SortDirection;
+  Partial<Record<keyof T, SortDirection | SortEnum>> & {
+    [path: string]: SortDirection | SortEnum;
   };
 
 export interface QueryOptions<T extends Record<string, any> = Record<string, any>> {
@@ -114,6 +119,62 @@ export interface Schema<TDocument extends Record<string, any> = Record<string, a
   };
 }
 
+export interface EncryptionOptions {
+  secret: string;
+  fields: string[];
+  algorithm?: string;
+}
+
+export interface PartitionOptions {
+  chunkSize: number;
+  strategy?: string;
+  key?: string;
+}
+
+export type ChangeType = "insert" | "update" | "delete" | "index";
+
+export interface ChangeEvent<T extends Record<string, any> = Record<string, any>> {
+  collection: string;
+  primaryKey: string;
+  type: ChangeType;
+  action?: string;
+  documents?: T[];
+  updates?: Array<{ previous: T; next: T }>;
+  deleted?: T[];
+  timestamp: string;
+  paths: string[];
+  [key: string]: any;
+}
+
+export interface WatchHandle<T extends Record<string, any> = Record<string, any>> {
+  on(event: "change", listener: (event: ChangeEvent<T>) => void): this;
+  once(event: "change", listener: (event: ChangeEvent<T>) => void): this;
+  off(event: "change", listener: (event: ChangeEvent<T>) => void): this;
+  close(): void;
+}
+
+export interface PartitionPlan {
+  optimized: boolean;
+  key?: string;
+  range: {
+    min: number | null;
+    max: number | null;
+    minExclusive?: boolean;
+    maxExclusive?: boolean;
+  } | null;
+  totalChunks: number;
+  scannedChunks: number;
+  documentsScanned: number;
+  matched?: number;
+  chunks: Array<{
+    start: number;
+    end: number;
+    count: number;
+    min: number | null;
+    max: number | null;
+  }>;
+}
+
 export type UpdateInstruction<T extends Record<string, any>> =
   | Partial<T>
   | {
@@ -160,12 +221,15 @@ export interface CollectionRuntimeOptions<T extends Record<string, any>> {
   validator?(document: T): void | Promise<void>;
   hooks?: CollectionHooks<T>;
   schema?: Schema<T> | SchemaDefinition<T> | SchemaFields<T>;
+  encryption?: EncryptionOptions;
+  partition?: PartitionOptions;
 }
 
 export interface CollectionOptions {
   primaryKey?: string;
   capped?: boolean;
   maxSize?: number | null;
+  partition?: PartitionOptions | null;
 }
 
 export interface CollectionStats {
@@ -200,6 +264,7 @@ export class JsonCollection<T extends Record<string, any> = Record<string, any>>
   }): Promise<void>;
   dropIndex(field: keyof T | string): Promise<void>;
   getStats(): CollectionStats;
+  explain(filter?: Filter<T>): PartitionPlan | null;
 }
 
 export interface StorageAdapter {
@@ -260,6 +325,8 @@ export class JsonDatabase {
   save(): Promise<void>;
   backup(destination?: string): Promise<string>;
   purgeExpired(): Promise<void>;
+  compact(): Promise<void>;
+  watch<T extends Record<string, any> = Record<string, any>>(pattern?: string): WatchHandle<T>;
   transaction<R>(callback: (db: JsonDatabase) => R | Promise<R>): Promise<R>;
   stats(): Promise<DatabaseStats>;
   close(): Promise<void>;

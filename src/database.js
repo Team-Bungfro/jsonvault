@@ -1,6 +1,7 @@
 "use strict";
 
 const path = require("path");
+const EventEmitter = require("events");
 const JsonCollection = require("./collection");
 const FileStorageAdapter = require("./storage/fileStorageAdapter");
 const debounce = require("./utils/debounce");
@@ -32,6 +33,7 @@ class JsonDatabase {
     this._autosave = debounce(() => this.save(), this._options.autosaveInterval);
     this._ttlTimer = null;
     this._ttlRunning = false;
+    this._watchers = new Set();
   }
 
   static async open(options = {}) {
@@ -94,6 +96,10 @@ class JsonDatabase {
       collection.setSchema(runtime.schema);
     }
 
+    if (Object.prototype.hasOwnProperty.call(runtime, "encryption")) {
+      collection.setEncryption(runtime.encryption);
+    }
+
     return collection;
   }
 
@@ -112,9 +118,84 @@ class JsonDatabase {
     await this._storage.deleteCollection(name);
   }
 
-  async _notifyChange(collection) {
+  async _notifyChange(collection, change = {}) {
     this._dirtyCollections.add(collection.name);
     this._scheduleAutosave();
+    this._emitChange(collection, change);
+  }
+
+  watch(pattern = "**") {
+    const regex = this._patternToRegex(pattern);
+    const emitter = new EventEmitter();
+    emitter.setMaxListeners(0);
+
+    const entry = { pattern, regex, emitter };
+    emitter.close = () => {
+      this._watchers.delete(entry);
+    };
+
+    this._watchers.add(entry);
+    return emitter;
+  }
+
+  _patternToRegex(pattern) {
+    if (!pattern || pattern === "**") {
+      return /^.*$/;
+    }
+
+    const escape = (segment) => segment.replace(/[.+?^${}()|[\]\\]/g, "\\$&");
+    const parts = pattern.split("/").map((segment) => {
+      if (segment === "**") {
+        return ".*";
+      }
+      if (segment === "*") {
+        return "[^/]+";
+      }
+      return escape(segment);
+    });
+
+    return new RegExp(`^${parts.join("/")}$`);
+  }
+
+  _emitChange(collection, change) {
+    if (!this._watchers || this._watchers.size === 0) {
+      return;
+    }
+
+    const event = {
+      collection: collection.name,
+      primaryKey: collection.primaryKey,
+      timestamp: new Date().toISOString(),
+      ...change,
+    };
+
+    const paths = new Set([collection.name]);
+
+    const appendFromDocs = (docs) => {
+      if (!Array.isArray(docs)) return;
+      for (const doc of docs) {
+        if (!doc || typeof doc !== "object") continue;
+        const id = doc[collection.primaryKey];
+        if (id !== undefined) {
+          paths.add(`${collection.name}/${id}`);
+        }
+      }
+    };
+
+    appendFromDocs(event.documents);
+    if (Array.isArray(event.updates)) {
+      appendFromDocs(event.updates.map((entry) => entry.next));
+      appendFromDocs(event.updates.map((entry) => entry.previous));
+    }
+    appendFromDocs(event.deleted);
+
+    event.paths = Array.from(paths);
+
+    for (const watcher of this._watchers) {
+      if (event.paths.some((path) => watcher.regex.test(path))) {
+        watcher.emitter.emit("change", { ...event });
+      }
+    }
   }
 
   _scheduleAutosave() {
@@ -147,6 +228,10 @@ class JsonDatabase {
 
   async purgeExpired() {
     await this._runTtlMaintenance();
+  }
+
+  async compact() {
+    await this.save();
   }
 
   async transaction(callback) {
