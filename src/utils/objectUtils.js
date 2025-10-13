@@ -41,6 +41,18 @@ const clonePrimitive = (value) => {
 };
 
 const cloneDeep = (value) => {
+  if (value instanceof Date || value instanceof RegExp) {
+    return clonePrimitive(value);
+  }
+
+  if (value instanceof Map) {
+    return new Map(Array.from(value.entries()).map(([key, item]) => [key, cloneDeep(item)]));
+  }
+
+  if (value instanceof Set) {
+    return new Set(Array.from(value).map((item) => cloneDeep(item)));
+  }
+
   if (Array.isArray(value)) {
     return value.map((item) => cloneDeep(item));
   }

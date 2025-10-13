@@ -1,7 +1,16 @@
 "use strict";
 
 const path = require("path");
-const { JsonDatabase } = require("../src");
+const { JsonDatabase, createSchema } = require("../src");
+
+const taskSchema = createSchema({
+  fields: {
+    title: { type: "string", required: true, trim: true, minLength: 3 },
+    done: { type: "boolean", default: false },
+    due: { type: "date", allowNull: true },
+  },
+  allowAdditional: false,
+});
 
 const run = async () => {
   const db = await JsonDatabase.open({
@@ -9,9 +18,7 @@ const run = async () => {
   });
 
   const tasks = db.collection("tasks", {
-    validator: (doc) => {
-      if (!doc.title) throw new Error("title is required");
-    },
+    schema: taskSchema,
   });
 
   await tasks.insertOne({ title: "Prototype demo", done: false });
@@ -24,6 +31,9 @@ const run = async () => {
 
   const openTasks = await tasks.find({ done: false }, { sort: { title: 1 } });
   console.log("Open tasks:", openTasks);
+
+  const statusCounts = await tasks.countBy("done");
+  console.log("Task counts:", statusCounts);
 
   await db.save();
   await db.close();

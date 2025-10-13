@@ -1,6 +1,6 @@
-# @bungfro/json architecture overview
+# jsonvault architecture overview
 
-This note describes the main pieces in @bungfro/json and how they work together.
+This note describes the main pieces in jsonvault and how they work together.
 
 ## Goals
 
@@ -16,7 +16,7 @@ The database writes to a directory that holds a meta.json file plus one JSON fil
 
 ## What the runtime supports
 
-The API is async friendly and allows multiple collections per database. It includes insert, find, update, delete, count, distinct, and projection helpers. Filters recognize operators like `$eq`, `$ne`, `$gt`, `$gte`, `$lt`, `$lte`, `$in`, `$nin`, `$regex`, `$exists`, `$size`, `$contains`, `$startsWith`, `$endsWith`, `$and`, `$or`, and `$not`. Collections can maintain single field secondary indexes, including unique ones. Autosave runs through a debounced writer, with manual `save()` and `backup()` available when needed. Consumers can plug in validation callbacks and lifecycle hooks for inserts, updates, and deletes.
+The API is async friendly and allows multiple collections per database. It includes insert, find, update, delete, count, distinct, and projection helpers. Filters recognize operators like `$eq`, `$ne`, `$gt`, `$gte`, `$lt`, `$lte`, `$in`, `$nin`, `$regex`, `$exists`, `$size`, `$contains`, `$startsWith`, `$endsWith`, `$and`, `$or`, and `$not`. Collections can maintain single field secondary indexes, including unique and TTL variants that clear expired documents automatically. Declarative schemas handle defaults, nested validation, and custom rules before user-defined validators run. Autosave runs through a debounced writer, with manual `save()` and `backup()` available when needed. Consumers can plug in validation callbacks and lifecycle hooks for inserts, updates, and deletes.
 
 ## TypeScript story
 
@@ -28,4 +28,4 @@ Unit tests cover storage, indexes, query operators, and transaction rollback. Th
 
 ## Future ideas
 
-Possible additions include TTL indexes with scheduled cleanup, alternative storage formats for large data sets, and a small HTTP bridge.
+Possible additions include alternative storage formats for large data sets and a small HTTP bridge.

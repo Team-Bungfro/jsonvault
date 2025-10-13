@@ -1,6 +1,6 @@
-# @bungfro/json
+# jsonvault
 
-@bungfro/json is a JSON document database for Node and Bun. It keeps data in plain files, supports async operations, and stays light on dependencies.
+jsonvault is a JSON document database for Node and Bun. It keeps data in plain files, supports async operations, and stays light on dependencies.
 
 ## What it does
 
@@ -8,6 +8,8 @@
 - Provides insert, find, update, delete, and count helpers.
 - Supports filter operators like `$eq`, `$in`, `$regex`, `$and`, `$or`, `$exists`, `$contains`, `$startsWith`, and `$endsWith`.
 - Maintains secondary indexes with optional uniqueness checks.
+- Supports TTL indexes that remove expired documents without manual cleanup.
+- Offers declarative schemas with defaults, nested rules, and custom validators.
 - Offers autosave, manual `save()` and `backup()` methods, and a simple transaction helper built on in-memory snapshots.
 - Ships with hooks and an optional validator so you can plug in your own logic.
 - Includes TypeScript definitions.
@@ -15,17 +17,17 @@
 ## Install
 
 ```sh
-npm install @bungfro/json
+npm install jsonvault
 # or
-pnpm add @bungfro/json
+pnpm add jsonvault
 # or
-bun add @bungfro/json
+bun add jsonvault
 ```
 
 ## Quick start
 
 ```js
-const { JsonDatabase } = require("@bungfro/json");
+const { JsonDatabase } = require("jsonvault");
 
 (async () => {
   const db = await JsonDatabase.open({ path: "./data" });
@@ -55,15 +57,63 @@ const posts = db.collection("posts", {
 });
 
 await posts.insertMany([
-  { title: "Welcome", tags: ["intro"], publishedAt: new Date() },
-  { title: "Indexes", tags: ["guide", "indexes"], publishedAt: new Date() },
+  { title: "Welcome", category: "intro", publishedAt: new Date() },
+  { title: "Indexes", category: "guide", publishedAt: new Date() },
 ]);
 
 const guides = await posts.find(
-  { tags: { $contains: "guide" } },
+  { category: "guide" },
   { projection: { title: 1 }, sort: { publishedAt: -1 } },
 );
+
+const categoryCounts = await posts.countBy("category");
+console.log(categoryCounts);
+
+await posts.ensureIndex("publishedAt", { ttlSeconds: 60 * 60 * 24 });
+
+const firstPost = await posts.at(0);
+console.log(firstPost?.title);
 ```
+
+## Schemas
+
+```js
+const { JsonDatabase, createSchema } = require("jsonvault");
+
+const db = await JsonDatabase.open();
+
+const userSchema = createSchema({
+  fields: {
+    name: { type: "string", required: true, minLength: 2, trim: true },
+    email: {
+      type: "string",
+      required: true,
+      pattern: ".+@.+\\..+",
+      transform: (value) => value.toLowerCase(),
+    },
+    age: { type: "number", min: 0, default: 0 },
+    roles: { type: "array", items: "string", default: () => [] },
+    profile: {
+      type: "object",
+      fields: {
+        theme: { type: "string", enum: ["light", "dark"], default: "light" },
+      },
+      allowAdditional: false,
+    },
+  },
+  allowAdditional: false,
+});
+
+const users = db.collection("users", { schema: userSchema });
+
+await users.insertOne({ name: "Ada", email: "ADA@example.com" });
+// defaults applied, email lowercased, roles set to []
+
+await users.insertOne({ name: "B", email: "broken" });
+// throws: schema violation (name too short, invalid email)
+```
+
+Schemas run before custom validators and hooks, so you can combine them when you need extra checks.
 
 ## Indexes
 
@@ -97,6 +147,23 @@ await db.transaction(async (session) => {
 
 If the callback throws, data returns to its pre-transaction state.
 
+## TTL indexes
+
+```js
+const db = await JsonDatabase.open({ ttlIntervalMs: 30_000 });
+const sessions = db.collection("sessions");
+
+await sessions.ensureIndex("createdAt", { ttlSeconds: 3600 });
+
+await sessions.insertOne({ user: "alice", createdAt: new Date() });
+await sessions.insertOne({ user: "bob", createdAt: new Date(Date.now() - 10 * 3600 * 1000) });
+
+// Bob's session disappears on the next TTL sweep
+await db.purgeExpired(); // run manually or wait for the background job
+```
+
+Use the `ttlIntervalMs` option to control how often the background scan runs. Set it to `0` to disable automatic sweeps and rely on manual `purgeExpired()` calls instead.
+
 ## Backups
 
 ```js
@@ -109,7 +176,7 @@ Pass a directory to `backup()` if you need a specific destination.
 ## TypeScript
 
 ```ts
-import { JsonDatabase } from "@bungfro/json";
+import { JsonDatabase } from "jsonvault";
 
 type User = {
   _id: string;
@@ -133,7 +200,14 @@ npm test
 
 This runs the storage, index, transaction, and query tests.
 
+## Benchmarks
+
+```sh
+npm run bench
+```
+
+Runs a simple benchmark that inserts documents, executes queries, and reports timings. Set `JSONVAULT_BENCH_DOCS` to change the document count.
+
 ## Looking ahead
 
-- TTL indexes and automatic cleanup.
 - Alternative storage formats for larger data sets.

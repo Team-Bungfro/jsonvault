@@ -1,5 +1,5 @@
 {
-  "name": "@bungfro/json",
+  "name": "jsonvault",
   "version": "1.0.0",
   "description": "Advanced, easy-to-use JSON document database for Node.js and Bun projects.",
   "license": "MIT",
@@ -23,7 +23,8 @@
     "docs"
   ],
   "scripts": {
-    "test": "node --test ./test/index.test.js"
+    "test": "node --test ./test/index.test.js",
+    "bench": "node ./benchmarks/basic.js"
   },
   "engines": {
     "node": ">=16.15.0"
@@ -35,9 +36,9 @@
     "storage",
     "document-store"
   ],
-  "author": "Bungfro",
+  "author": "devbungfro",
   "repository": {
     "type": "git",
-    "url": "https://github.com/team-bungfro/json.git"
+    "url": "https://github.com/team-bungfro/jsonvault.git"
   }
 }

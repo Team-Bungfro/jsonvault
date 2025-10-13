@@ -10,6 +10,7 @@ const { generateId } = require("./utils/idGenerator");
 const { queryDocuments } = require("./query/queryEngine");
 const { matchFilter } = require("./query/operators");
 const IndexManager = require("./indexing/indexManager");
+const { createSchema } = require("./schema/schema");
 
 const asyncMaybe = async (fn, payload) => {
   if (typeof fn !== "function") {
@@ -199,6 +200,8 @@ class JsonCollection {
       maxSize: persistedOptions.maxSize || null,
     };
 
+    this.setSchema(config.runtime?.schema);
+
     this._runtime = {
       validator: config.runtime?.validator,
       hooks: config.runtime?.hooks || {},
@@ -249,6 +252,8 @@ class JsonCollection {
         `Document with ${this._primaryKey} "${id}" already exists in collection "${this._name}"`,
       );
     }
+
+    this._applySchema(incoming, { operation: "insert" });
 
     await asyncMaybe(this._runtime.validator, incoming);
     await asyncMaybe(this._runtime.hooks.beforeInsert, incoming);
@@ -312,6 +317,23 @@ class JsonCollection {
     return first || null;
   }
 
+  async at(index, filter = {}, options = {}) {
+    if (!Number.isInteger(index)) {
+      throw new Error("Collection.at index must be an integer");
+    }
+
+    if (index < 0) {
+      throw new Error("Collection.at does not support negative indexes");
+    }
+
+    const [result] = await this.find(filter, {
+      ...options,
+      skip: index,
+      limit: 1,
+    });
+    return result || null;
+  }
+
   async findById(id) {
     const doc = this._byId.get(id);
     return doc ? cloneDeep(doc) : null;
@@ -333,15 +355,21 @@ class JsonCollection {
         throw new Error("Updating the primary key is not supported");
       }
 
-      await asyncMaybe(this._runtime.validator, next);
-      await asyncMaybe(this._runtime.hooks.beforeUpdate, {
-        previous: cloneDeep(current),
-        next: cloneDeep(next),
+      const index = this._documents.indexOf(current);
+      const previousSnapshot = cloneDeep(current);
+
+      this._applySchema(next, {
+        operation: "update",
+        previous: previousSnapshot,
         update,
       });
 
-      const index = this._documents.indexOf(current);
-      const previousSnapshot = cloneDeep(current);
+      await asyncMaybe(this._runtime.validator, next);
+      await asyncMaybe(this._runtime.hooks.beforeUpdate, {
+        previous: cloneDeep(previousSnapshot),
+        next: cloneDeep(next),
+        update,
+      });
 
       this._documents[index] = next;
       this._byId.set(id, next);
@@ -475,6 +503,32 @@ class JsonCollection {
     return matches;
   }
 
+  async countBy(field, filter = {}) {
+    const matches = await this.find(filter, {
+      projection: { [field]: 1 },
+    });
+
+    const buckets = new Map();
+
+    for (const doc of matches) {
+      const value = getByPath(doc, field);
+      const key =
+        value === undefined ? "__undefined__" : JSON.stringify(value);
+
+      if (!buckets.has(key)) {
+        buckets.set(key, {
+          value: value === undefined ? undefined : cloneDeep(value),
+          count: 0,
+        });
+      }
+
+      const bucket = buckets.get(key);
+      bucket.count += 1;
+    }
+
+    return Array.from(buckets.values());
+  }
+
   async ensureIndex(field, options = {}) {
     this._indexes.ensureIndex(field, options);
     this._indexes.rebuild(this._documents);
@@ -521,6 +575,50 @@ class JsonCollection {
     }
 
     this._indexes.rebuild(this._documents);
+  }
+
+  async _purgeExpiredDocuments(now = Date.now()) {
+    if (!this._indexes.hasTtlIndexes()) {
+      return;
+    }
+
+    const expiredIds = Array.from(this._indexes.collectExpired(now));
+    if (expiredIds.length === 0) {
+      return;
+    }
+
+    await this.deleteMany({
+      [this._primaryKey]: { $in: expiredIds },
+    });
+  }
+
+  _hasTtlIndexes() {
+    return this._indexes.hasTtlIndexes();
+  }
+
+  _applySchema(document, context) {
+    if (!this._schema || typeof this._schema.validate !== "function") {
+      return;
+    }
+
+    this._schema.validate(document, {
+      ...context,
+      collection: this,
+      document,
+      primaryKey: this._primaryKey,
+    });
+  }
+
+  setSchema(schemaDefinition) {
+    if (!schemaDefinition) {
+      this._schema = null;
+      return;
+    }
+
+    this._schema =
+      typeof schemaDefinition.validate === "function"
+        ? schemaDefinition
+        : createSchema(schemaDefinition);
   }
 }
 

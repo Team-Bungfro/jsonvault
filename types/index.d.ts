@@ -49,6 +49,71 @@ export interface QueryOptions<T extends Record<string, any> = Record<string, any
   distinct?: string;
 }
 
+export type SchemaTypeName = "string" | "number" | "boolean" | "date" | "array" | "object" | "any";
+
+export interface SchemaContext<TDocument extends Record<string, any> = Record<string, any>> {
+  document: TDocument;
+  operation?: "insert" | "update" | string;
+  path?: string;
+  collection?: JsonCollection<TDocument>;
+  [key: string]: any;
+}
+
+export interface SchemaFieldBase<TValue = any, TDocument extends Record<string, any> = Record<string, any>> {
+  type?: SchemaTypeName;
+  required?: boolean;
+  allowNull?: boolean;
+  default?: TValue | (() => TValue);
+  enum?: TValue[];
+  min?: number | Date;
+  max?: number | Date;
+  minLength?: number;
+  maxLength?: number;
+  pattern?: RegExp | string;
+  trim?: boolean;
+  description?: string;
+  validate?(value: TValue, context: SchemaContext<TDocument>): boolean | void | TValue;
+  transform?(value: TValue, context: SchemaContext<TDocument>): TValue;
+}
+
+export interface SchemaArrayField<TValue = any, TDocument extends Record<string, any> = Record<string, any>>
+  extends SchemaFieldBase<TValue[], TDocument> {
+  type: "array";
+  items?: SchemaFieldDefinition<any, TDocument>;
+}
+
+export interface SchemaObjectField<TValue = any, TDocument extends Record<string, any> = Record<string, any>>
+  extends SchemaFieldBase<TValue, TDocument> {
+  type: "object";
+  fields?: SchemaFields<TDocument>;
+  allowAdditional?: boolean;
+}
+
+export type SchemaFieldDefinition<TDocument extends Record<string, any> = Record<string, any>> =
+  | SchemaFieldBase<any, TDocument>
+  | SchemaArrayField<any, TDocument>
+  | SchemaObjectField<any, TDocument>
+  | SchemaTypeName;
+
+export type SchemaFields<TDocument extends Record<string, any> = Record<string, any>> = {
+  [K in keyof TDocument]?: SchemaFieldDefinition<TDocument>;
+} & {
+  [path: string]: SchemaFieldDefinition<TDocument>;
+};
+
+export interface SchemaDefinition<TDocument extends Record<string, any> = Record<string, any>> {
+  fields?: SchemaFields<TDocument>;
+  allowAdditional?: boolean;
+}
+
+export interface Schema<TDocument extends Record<string, any> = Record<string, any>> {
+  validate(document: TDocument, context?: Partial<SchemaContext<TDocument>>): TDocument;
+  definition: {
+    fields: Record<string, SchemaFieldDefinition<TDocument>>;
+    allowAdditional: boolean;
+  };
+}
+
 export type UpdateInstruction<T extends Record<string, any>> =
   | Partial<T>
   | {
@@ -94,6 +159,7 @@ export interface CollectionRuntimeOptions<T extends Record<string, any>> {
   primaryKey?: keyof T extends string ? keyof T : string;
   validator?(document: T): void | Promise<void>;
   hooks?: CollectionHooks<T>;
+  schema?: Schema<T> | SchemaDefinition<T> | SchemaFields<T>;
 }
 
 export interface CollectionOptions {
@@ -117,6 +183,7 @@ export class JsonCollection<T extends Record<string, any> = Record<string, any>>
   insertMany(documents: Array<Partial<T> & { [key: string]: any }>): Promise<T[]>;
   find(filter?: Filter<T>, options?: QueryOptions<T>): Promise<T[]>;
   findOne(filter?: Filter<T>, options?: QueryOptions<T>): Promise<T | null>;
+  at(index: number, filter?: Filter<T>, options?: QueryOptions<T>): Promise<T | null>;
   findById(id: string): Promise<T | null>;
   updateOne(filter: Filter<T>, update: UpdateInstruction<T>, options?: UpdateOptions<T>): Promise<UpdateManyResult>;
   updateMany(filter: Filter<T>, update: UpdateInstruction<T>, options?: UpdateOptions<T>): Promise<UpdateManyResult>;
@@ -125,7 +192,12 @@ export class JsonCollection<T extends Record<string, any> = Record<string, any>>
   deleteMany(filter: Filter<T>): Promise<DeleteResult>;
   count(filter?: Filter<T>): Promise<number>;
   distinct<K extends keyof T | string>(field: K, filter?: Filter<T>): Promise<Array<T[K & keyof T]>>;
-  ensureIndex(field: keyof T | string, options?: { unique?: boolean }): Promise<void>;
+  countBy<K extends keyof T | string>(field: K, filter?: Filter<T>): Promise<Array<{ value: T[K & keyof T] | any; count: number }>>;
+  ensureIndex(field: keyof T | string, options?: {
+    unique?: boolean;
+    ttlSeconds?: number;
+    expireAfterSeconds?: number;
+  }): Promise<void>;
   dropIndex(field: keyof T | string): Promise<void>;
   getStats(): CollectionStats;
 }
@@ -151,6 +223,7 @@ export interface JsonDatabaseOptions {
   autosave?: boolean;
   autosaveInterval?: number;
   storage?: StorageAdapter;
+  ttlIntervalMs?: number;
 }
 
 export interface DatabaseStats {
@@ -186,6 +259,7 @@ export class JsonDatabase {
   dropCollection(name: string): Promise<void>;
   save(): Promise<void>;
   backup(destination?: string): Promise<string>;
+  purgeExpired(): Promise<void>;
   transaction<R>(callback: (db: JsonDatabase) => R | Promise<R>): Promise<R>;
   stats(): Promise<DatabaseStats>;
   close(): Promise<void>;
@@ -202,3 +276,7 @@ export declare const operators: {
 };
 
 export default JsonDatabase;
+
+export declare function createSchema<T extends Record<string, any>>(
+  definition: SchemaDefinition<T> | SchemaFields<T>
+): Schema<T>;

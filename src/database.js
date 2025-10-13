@@ -10,6 +10,7 @@ const DEFAULT_OPTIONS = {
   path: path.resolve(process.cwd(), "json-storage"),
   autosave: true,
   autosaveInterval: 750,
+  ttlIntervalMs: 60_000,
 };
 
 class JsonDatabase {
@@ -29,6 +30,8 @@ class JsonDatabase {
     this._state = "closed";
 
     this._autosave = debounce(() => this.save(), this._options.autosaveInterval);
+    this._ttlTimer = null;
+    this._ttlRunning = false;
   }
 
   static async open(options = {}) {
@@ -48,6 +51,7 @@ class JsonDatabase {
     }
 
     this._state = "ready";
+    this._startTtlTimer();
   }
 
   _createCollection(name, documents = [], indexes = {}, options = {}, runtime = {}) {
@@ -84,6 +88,10 @@ class JsonDatabase {
         validator: runtime.validator || collection._runtime.validator,
         hooks: { ...collection._runtime.hooks, ...runtime.hooks },
       };
+    }
+
+    if (Object.prototype.hasOwnProperty.call(runtime, "schema")) {
+      collection.setSchema(runtime.schema);
     }
 
     return collection;
@@ -135,6 +143,10 @@ class JsonDatabase {
 
   async backup(destination) {
     return this._storage.backup(destination);
+  }
+
+  async purgeExpired() {
+    await this._runTtlMaintenance();
   }
 
   async transaction(callback) {
@@ -191,6 +203,7 @@ class JsonDatabase {
   async close() {
     await this._autosave.flush();
     await this.save();
+    this._stopTtlTimer();
     this._state = "closed";
   }
 
@@ -204,6 +217,57 @@ class JsonDatabase {
       collections,
       totalDocuments: collections.reduce((sum, entry) => sum + entry.count, 0),
     };
+  }
+
+  _startTtlTimer() {
+    if (this._options.ttlIntervalMs <= 0 || this._ttlTimer) {
+      return;
+    }
+
+    this._ttlTimer = setInterval(() => {
+      this._runTtlMaintenance().catch((error) => {
+        console.error("[JsonDatabase] TTL maintenance failed:", error);
+      });
+    }, this._options.ttlIntervalMs);
+
+    if (typeof this._ttlTimer.unref === "function") {
+      this._ttlTimer.unref();
+    }
+  }
+
+  _stopTtlTimer() {
+    if (this._ttlTimer) {
+      clearInterval(this._ttlTimer);
+      this._ttlTimer = null;
+    }
+  }
+
+  async _runTtlMaintenance() {
+    if (this._ttlRunning) {
+      return;
+    }
+
+    this._ttlRunning = true;
+    const now = Date.now();
+
+    try {
+      for (const collection of this._collections.values()) {
+        if (!collection._hasTtlIndexes()) {
+          continue;
+        }
+
+        try {
+          await collection._purgeExpiredDocuments(now);
+        } catch (error) {
+          console.error(
+            `[JsonDatabase] TTL sweep failed for collection "${collection.name}":`,
+            error,
+          );
+        }
+      }
+    } finally {
+      this._ttlRunning = false;
+    }
   }
 }
 

@@ -15,24 +15,79 @@ const fingerprint = (value) => {
   return `${typeof value}:${value}`;
 };
 
+const resolveTimestamp = (field, value) => {
+  if (value === undefined || value === null) {
+    return null;
+  }
+
+  if (value instanceof Date) {
+    return value.getTime();
+  }
+
+  if (typeof value === "number") {
+    return value;
+  }
+
+  if (typeof value === "string") {
+    const parsed = Date.parse(value);
+    if (!Number.isNaN(parsed)) {
+      return parsed;
+    }
+  }
+
+  throw new Error(
+    `Cannot index field "${field}" as TTL because the value "${value}" is not a date, number, or ISO string.`,
+  );
+};
+
 class IndexManager {
   constructor(collectionName) {
     this.collectionName = collectionName;
     this.indexes = new Map();
   }
 
-  ensureIndex(field, options = {}) {
+  ensureIndex(field, rawOptions = {}) {
     if (this.indexes.has(field)) {
       return;
     }
 
+    const ttlSeconds = this._normalizeTtl(rawOptions);
+    const options = {
+      unique: Boolean(rawOptions.unique),
+    };
+
+    if (ttlSeconds !== null) {
+      options.ttlSeconds = ttlSeconds;
+    }
+
     this.indexes.set(field, {
       field,
-      options: {
-        unique: Boolean(options.unique),
-      },
+      options,
       values: new Map(),
+      ttl: ttlSeconds !== null ? new Map() : null,
     });
+  }
+
+  _normalizeTtl(options = {}) {
+    if (
+      options.ttlSeconds === undefined &&
+      options.expireAfterSeconds === undefined
+    ) {
+      return null;
+    }
+
+    const ttlValue =
+      options.ttlSeconds !== undefined
+        ? Number(options.ttlSeconds)
+        : Number(options.expireAfterSeconds);
+
+    if (!Number.isFinite(ttlValue) || ttlValue <= 0) {
+      throw new Error(
+        `ttlSeconds/expireAfterSeconds for collection "${this.collectionName}" must be a positive number`,
+      );
+    }
+
+    return ttlValue;
   }
 
   dropIndex(field) {
@@ -43,7 +98,7 @@ class IndexManager {
     const snapshot = {};
     for (const [field, index] of this.indexes.entries()) {
       snapshot[field] = {
-        options: index.options,
+        options: { ...index.options },
       };
     }
     return snapshot;
@@ -58,6 +113,9 @@ class IndexManager {
   rebuild(documents) {
     for (const index of this.indexes.values()) {
       index.values.clear();
+      if (index.ttl) {
+        index.ttl.clear();
+      }
     }
 
     for (const doc of documents) {
@@ -69,6 +127,7 @@ class IndexManager {
     for (const index of this.indexes.values()) {
       const value = getByPath(doc, index.field);
       const key = fingerprint(value);
+
       if (!index.values.has(key)) {
         index.values.set(key, new Set());
       }
@@ -81,6 +140,18 @@ class IndexManager {
       }
 
       set.add(doc._id);
+
+      if (index.ttl) {
+        const baseTime = resolveTimestamp(index.field, value);
+        if (baseTime === null) {
+          index.ttl.delete(doc._id);
+        } else {
+          index.ttl.set(
+            doc._id,
+            baseTime + index.options.ttlSeconds * 1000,
+          );
+        }
+      }
     }
   }
 
@@ -97,6 +168,10 @@ class IndexManager {
       set.delete(doc._id);
       if (set.size === 0) {
         index.values.delete(key);
+      }
+
+      if (index.ttl) {
+        index.ttl.delete(doc._id);
       }
     }
   }
@@ -154,6 +229,33 @@ class IndexManager {
       }
     }
     return output;
+  }
+
+  hasTtlIndexes() {
+    for (const index of this.indexes.values()) {
+      if (index.ttl) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  collectExpired(now = Date.now()) {
+    const expired = new Set();
+
+    for (const index of this.indexes.values()) {
+      if (!index.ttl) {
+        continue;
+      }
+
+      for (const [docId, expiry] of index.ttl.entries()) {
+        if (expiry <= now) {
+          expired.add(docId);
+        }
+      }
+    }
+
+    return expired;
   }
 }
 
