@@ -1,0 +1,43 @@
+{
+  "name": "@bungfro/json",
+  "version": "1.0.0",
+  "description": "Advanced, easy-to-use JSON document database for Node.js and Bun projects.",
+  "license": "MIT",
+  "type": "commonjs",
+  "main": "src/index.js",
+  "exports": {
+    ".": {
+      "require": "./src/index.js",
+      "default": "./src/index.js",
+      "types": "./types/index.d.ts"
+    },
+    "./package.json": "./package.json"
+  },
+  "types": "types/index.d.ts",
+  "files": [
+    "src",
+    "types",
+    "examples",
+    "README.md",
+    "LICENSE",
+    "docs"
+  ],
+  "scripts": {
+    "test": "node --test ./test/index.test.js"
+  },
+  "engines": {
+    "node": ">=16.15.0"
+  },
+  "keywords": [
+    "json",
+    "database",
+    "jsondb",
+    "storage",
+    "document-store"
+  ],
+  "author": "Bungfro",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/bungfro/json.git"
+  }
+}
