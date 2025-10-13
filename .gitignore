@@ -5,3 +5,4 @@ coverage/
 dist/
 json-storage/
 test/manual_test.js
+data/
