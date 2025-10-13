@@ -36,9 +36,14 @@ export interface Projection {
 
 export type SortDirection = 1 | -1;
 
+export enum SortEnum {
+  ASC = 1,
+  DESC = -1,
+}
+
 export type SortSpec<T extends Record<string, any> = Record<string, any>> =
-  Partial<Record<keyof T, SortDirection>> & {
-    [path: string]: SortDirection;
+  Partial<Record<keyof T, SortDirection | SortEnum>> & {
+    [path: string]: SortDirection | SortEnum;
   };
 
 export interface QueryOptions<T extends Record<string, any> = Record<string, any>> {

@@ -1,7 +1,7 @@
 "use strict";
 
 const path = require("path");
-const { JsonDatabase, createSchema } = require("../src");
+const { JsonDatabase, createSchema, Sort } = require("../src");
 
 const taskSchema = createSchema({
   fields: {
@@ -29,7 +29,10 @@ const run = async () => {
     { $set: { due: new Date().toISOString() } },
   );
 
-  const openTasks = await tasks.find({ done: false }, { sort: { title: 1 } });
+  const openTasks = await tasks.find(
+    { done: false },
+    { sort: { title: Sort.ASC } },
+  );
   console.log("Open tasks:", openTasks);
 
   const statusCounts = await tasks.countBy("done");

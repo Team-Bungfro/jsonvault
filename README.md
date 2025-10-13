@@ -29,7 +29,7 @@ bun add jsonvault
 ## Quick start
 
 ```js
-const { JsonDatabase } = require("jsonvault");
+const { JsonDatabase, Sort } = require("jsonvault");
 
 (async () => {
   const db = await JsonDatabase.open({ path: "./data" });
@@ -65,7 +65,7 @@ await posts.insertMany([
 
 const guides = await posts.find(
   { category: "guide" },
-  { projection: { title: 1 }, sort: { publishedAt: -1 } },
+  { projection: { title: 1 }, sort: { publishedAt: Sort.DESC } },
 );
 
 const categoryCounts = await posts.countBy("category");

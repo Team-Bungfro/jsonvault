@@ -6,7 +6,7 @@ const fs = require("node:fs/promises");
 const path = require("node:path");
 const os = require("node:os");
 
-const { JsonDatabase, FileStorageAdapter, queryDocuments, createSchema } = require("../src");
+const { JsonDatabase, FileStorageAdapter, queryDocuments, createSchema, Sort } = require("../src");
 
 const createTempDir = async () => {
   const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "jsonvault-"));
@@ -169,7 +169,7 @@ test("at returns the nth document respecting filters", async () => {
   const first = await posts.at(0);
   assert.equal(first.title, "First");
 
-  const secondGuide = await posts.at(1, { category: "guide" }, { sort: { title: 1 } });
+  const secondGuide = await posts.at(1, { category: "guide" }, { sort: { title: Sort.ASC } });
   assert.equal(secondGuide.title, "Third");
 
   const missing = await posts.at(5);
@@ -367,7 +367,7 @@ test("purgeExpired removes stale documents when TTL index is present", async () 
 
   await db.purgeExpired();
 
-  const remaining = await sessions.find({}, { sort: { user: 1 } });
+  const remaining = await sessions.find({}, { sort: { user: Sort.ASC } });
   assert.equal(remaining.length, 1);
   assert.equal(remaining[0].user, "fresh");
 
@@ -390,7 +390,7 @@ test("TTL interval automatically removes expired documents", async () => {
 
   await new Promise((resolve) => setTimeout(resolve, 80));
 
-  const docs = await tokens.find({}, { sort: { id: 1 } });
+  const docs = await tokens.find({}, { sort: { id: Sort.ASC } });
   assert.equal(docs.length, 1);
   assert.equal(docs[0].id, "new");
 
