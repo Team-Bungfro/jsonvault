@@ -12,6 +12,12 @@ const DEFAULT_META = {
   updatedAt: null,
 };
 
+const defaultSerializer = {
+  extension: "json",
+  stringify: (data) => JSON.stringify(data, null, 2),
+  parse: (str) => JSON.parse(str),
+};
+
 const ensureDir = async (directory) => {
   await fs.mkdir(directory, { recursive: true });
 };
@@ -60,6 +66,9 @@ class FileStorageAdapter {
     this.metaFile = path.join(this.directory, "meta.json");
     this.backupDir =
       options.backupDir || path.join(this.directory, "backups");
+    this.serializer = options.serializer || defaultSerializer;
+    this.collectionSuffix = `.collection.${this.serializer.extension}`;
+    this.chunkExtension = this.serializer.extension;
   }
 
   async init() {
@@ -106,12 +115,15 @@ class FileStorageAdapter {
     });
 
     return entries
-      .filter((entry) => entry.isFile() && entry.name.endsWith(".collection.json"))
-      .map((entry) => entry.name.replace(".collection.json", ""));
+      .filter(
+        (entry) =>
+          entry.isFile() && entry.name.endsWith(this.collectionSuffix),
+      )
+      .map((entry) => entry.name.replace(this.collectionSuffix, ""));
   }
 
   collectionPath(name) {
-    return path.join(this.collectionsDir, `${name}.collection.json`);
+    return path.join(this.collectionsDir, `${name}${this.collectionSuffix}`);
   }
 
   chunkDirectory(name) {
@@ -123,7 +135,7 @@ class FileStorageAdapter {
 
     try {
       const payload = await fs.readFile(filePath, "utf8");
-      const parsed = JSON.parse(payload);
+      const parsed = this.serializer.parse(payload);
 
       let documents = parsed.documents || [];
       if (!documents.length && Array.isArray(parsed.chunks) && parsed.chunks.length > 0) {
@@ -133,7 +145,7 @@ class FileStorageAdapter {
           const chunkPath = path.join(chunkDir, chunk.file);
           try {
             const raw = await fs.readFile(chunkPath, "utf8");
-            documents.push(...JSON.parse(raw));
+            documents.push(...this.serializer.parse(raw));
           } catch (error) {
             if (error.code === "ENOENT") {
               continue;
@@ -181,9 +193,9 @@ class FileStorageAdapter {
       while (offset < documents.length) {
         const slice = documents.slice(offset, offset + partition.chunkSize);
         index += 1;
-        const file = `${name}.chunk-${String(index).padStart(4, "0")}.json`;
+        const file = `${name}.chunk-${String(index).padStart(4, "0")}.${this.chunkExtension}`;
         const chunkPath = path.join(chunkDir, file);
-        await atomicWriteFile(chunkPath, JSON.stringify(slice, null, 2));
+        await atomicWriteFile(chunkPath, this.serializer.stringify(slice));
 
         let min = null;
         let max = null;
@@ -220,7 +232,7 @@ class FileStorageAdapter {
       chunks: chunksMeta,
     };
 
-    await atomicWriteFile(filePath, JSON.stringify(wrapped, null, 2));
+    await atomicWriteFile(filePath, this.serializer.stringify(wrapped));
   }
 
   async deleteCollection(name) {

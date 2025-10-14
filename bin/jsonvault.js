@@ -20,6 +20,8 @@ const usage = () => {
       "Options for dump:",
       "  --limit=<n>                  Limit number of documents (default: 20)",
       "  --filter=<json>              JSON filter object",
+      "  --adapter=<name>             Choose adapter (json, yaml, ...)",
+      "  --adapterOptions=<json>      Adapter-specific options",
       "",
       "Options for export:",
       "  --limit=<n>                  Limit number of documents",
@@ -54,6 +56,22 @@ const parseJson = (value, fallback = {}) => {
   } catch (error) {
     throw new Error(`Failed to parse JSON: ${value}`);
   }
+};
+
+const buildDbOptions = (opts = {}) => {
+  const adapterOptions = opts.adapterOptions
+    ? parseJson(opts.adapterOptions, {})
+    : undefined;
+
+  return {
+    adapter: opts.adapter,
+    adapterOptions,
+  };
+};
+
+const stripDbOptions = (opts = {}) => {
+  const { adapter, adapterOptions, ...rest } = opts;
+  return rest;
 };
 
 const flattenDocument = (doc, prefix = "", target = {}) => {
@@ -108,9 +126,14 @@ const documentsToCsv = (documents) => {
   return rows.join("\n");
 };
 
-const withDatabase = async (dbPath, handler) => {
+const withDatabase = async (dbPath, dbOptions, handler) => {
   const resolved = path.resolve(process.cwd(), dbPath);
-  const db = await JsonDatabase.open({ path: resolved, autosave: false });
+  const db = await JsonDatabase.open({
+    path: resolved,
+    autosave: false,
+    adapter: dbOptions.adapter,
+    adapterOptions: dbOptions.adapterOptions,
+  });
   try {
     return await handler(db);
   } finally {
@@ -119,8 +142,8 @@ const withDatabase = async (dbPath, handler) => {
 };
 
 const commands = {
-  async list(dbPath) {
-    await withDatabase(dbPath, async (db) => {
+  async list(dbPath, options) {
+    await withDatabase(dbPath, options, async (db) => {
       const collections = db.listCollections();
       if (collections.length === 0) {
         stdout.write("No collections found\n");
@@ -132,15 +155,15 @@ const commands = {
     });
   },
 
-  async stats(dbPath) {
-    await withDatabase(dbPath, async (db) => {
+  async stats(dbPath, options) {
+    await withDatabase(dbPath, options, async (db) => {
       const stats = await db.stats();
       stdout.write(`${JSON.stringify(stats, null, 2)}\n`);
     });
   },
 
-  async dump(dbPath, collectionName, opts) {
-    await withDatabase(dbPath, async (db) => {
+  async dump(dbPath, dbOptions, collectionName, opts) {
+    await withDatabase(dbPath, dbOptions, async (db) => {
       const collection = db.collection(collectionName);
       const limit = Number(opts.limit ?? 20);
       const filter = parseJson(opts.filter, {});
@@ -150,8 +173,8 @@ const commands = {
     });
   },
 
-  async export(dbPath, collectionName, opts) {
-    await withDatabase(dbPath, async (db) => {
+  async export(dbPath, dbOptions, collectionName, opts) {
+    await withDatabase(dbPath, dbOptions, async (db) => {
       const collection = db.collection(collectionName);
       const limit = opts.limit ? Number(opts.limit) : undefined;
       const filter = parseJson(opts.filter, {});
@@ -194,23 +217,33 @@ const main = async () => {
     switch (command) {
       case "list":
         if (positional.length < 1) throw new Error("list requires <path>");
-        await commands.list(positional[0]);
+        await commands.list(positional[0], buildDbOptions(options));
         break;
       case "stats":
         if (positional.length < 1) throw new Error("stats requires <path>");
-        await commands.stats(positional[0]);
+        await commands.stats(positional[0], buildDbOptions(options));
         break;
       case "dump":
         if (positional.length < 2) {
           throw new Error("dump requires <path> and <collection>");
         }
-        await commands.dump(positional[0], positional[1], options);
+        await commands.dump(
+          positional[0],
+          buildDbOptions(options),
+          positional[1],
+          stripDbOptions(options),
+        );
         break;
       case "export":
         if (positional.length < 2) {
           throw new Error("export requires <path> and <collection>");
         }
-        await commands.export(positional[0], positional[1], options);
+        await commands.export(
+          positional[0],
+          buildDbOptions(options),
+          positional[1],
+          stripDbOptions(options),
+        );
         break;
       default:
         throw new Error(`Unknown command "${command}"`);

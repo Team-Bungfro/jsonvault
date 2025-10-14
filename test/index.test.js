@@ -6,7 +6,15 @@ const fs = require("node:fs/promises");
 const path = require("node:path");
 const os = require("node:os");
 
-const { JsonDatabase, FileStorageAdapter, queryDocuments, createSchema, Sort } = require("../src");
+const {
+  JsonDatabase,
+  FileStorageAdapter,
+  queryDocuments,
+  createSchema,
+  Sort,
+  registerAdapter,
+  listAdapters,
+} = require("../src");
 
 const createTempDir = async () => {
   const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "jsonvault-"));
@@ -285,6 +293,121 @@ test("watch emits change events", async () => {
   assert.equal(events[1].updates[0].next.name, "Updated");
   assert.equal(events[2].type, "delete");
   assert.equal(events[2].deleted[0]._id, inserted._id);
+});
+
+test("yaml adapter stores data with .yaml extension", async (t) => {
+  let yaml;
+  try {
+    yaml = require("yaml");
+  } catch (error) {
+    t.skip("yaml package not installed");
+    return;
+  }
+
+  assert.ok(yaml, "yaml dependency should load");
+
+  const tempDir = await createTempDir();
+  const db = await JsonDatabase.open({
+    path: tempDir,
+    autosave: false,
+    adapter: "yaml",
+  });
+
+  const users = db.collection("users");
+  await users.insertOne({ name: "YAML" });
+  await db.save();
+  await db.close();
+
+  const collectionsDir = path.join(tempDir, "collections");
+  const files = await fs.readdir(collectionsDir);
+  assert.ok(files.some((file) => file.endsWith(".collection.yaml")));
+});
+
+test("custom adapter registration", async () => {
+  const adaptersBefore = listAdapters();
+  class MemoryAdapter {
+    constructor() {
+      this.meta = { version: 1 };
+      this.collections = new Map();
+    }
+
+    async init() {}
+
+    async readMeta() {
+      return { ...this.meta };
+    }
+
+    async writeMeta(meta) {
+      this.meta = { ...this.meta, ...meta };
+      return this.meta;
+    }
+
+    async listCollections() {
+      return Array.from(this.collections.keys());
+    }
+
+    async readCollection(name) {
+      if (this.collections.has(name)) {
+        return JSON.parse(JSON.stringify(this.collections.get(name)));
+      }
+      return {
+        name,
+        documents: [],
+        indexes: {},
+        options: {},
+      };
+    }
+
+    async writeCollection(name, payload) {
+      this.collections.set(name, JSON.parse(JSON.stringify(payload)));
+    }
+
+    async deleteCollection(name) {
+      this.collections.delete(name);
+    }
+
+    async backup() {
+      return "";
+    }
+  }
+
+  registerAdapter("memory-test", () => new MemoryAdapter());
+  const adaptersAfter = listAdapters();
+  assert.ok(adaptersAfter.length >= adaptersBefore.length);
+
+  const db = await JsonDatabase.open({
+    adapter: "memory-test",
+    autosave: false,
+  });
+
+  const users = db.collection("users");
+  await users.insertOne({ name: "Memory" });
+  const count = await users.count();
+  assert.equal(count, 1);
+
+  await db.close();
+});
+
+test("snapshot and restore revert state", async () => {
+  const tempDir = await createTempDir();
+  const db = await JsonDatabase.open({ path: tempDir, autosave: false });
+  const items = db.collection("items");
+
+  await items.insertOne({ name: "before" });
+  const snapshot = await db.snapshot();
+
+  await items.insertOne({ name: "after" });
+  let count = await items.count();
+  assert.equal(count, 2);
+
+  await db.restore(snapshot);
+  count = await items.count();
+  assert.equal(count, 1);
+
+  const doc = await items.findOne();
+  assert.equal(doc.name, "before");
+
+  await db.close();
 });
 
 test("schema validation applies defaults and rejects invalid docs", async () => {

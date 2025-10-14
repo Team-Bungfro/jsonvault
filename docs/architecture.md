@@ -16,6 +16,10 @@ An event subsystem broadcasts insert/update/delete activity. `JsonDatabase.watch
 
 When partition metadata includes a key, `collection.explain(query)` surfaces the chunk plan that a filter will scan, allowing operators to monitor and tune query behaviour.
 
+Adapters are pluggable factories. The registry ships with JSON and YAML file adapters and can be extended via `registerAdapter(name, factory)`. Database instances resolve adapters by name (`JsonDatabase.open({ adapter: "yaml" })`).
+
+Databases expose `snapshot()`/`restore()` so callers can capture in-memory state and roll back as needed without leaving the process.
+
 ## Persistence model
 
 The database writes to a directory that holds a meta.json file plus one JSON file per collection. Each collection file stores metadata, the document list, and index configuration. Writes happen through atomic file replacement. Transactions rely on in-memory snapshots for rollback, so no journal files yet.

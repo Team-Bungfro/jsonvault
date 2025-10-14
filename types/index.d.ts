@@ -41,6 +41,8 @@ export enum SortEnum {
   DESC = -1,
 }
 
+export declare const Sort: typeof SortEnum;
+
 export type SortSpec<T extends Record<string, any> = Record<string, any>> =
   Partial<Record<keyof T, SortDirection | SortEnum>> & {
     [path: string]: SortDirection | SortEnum;
@@ -283,18 +285,32 @@ export interface StorageAdapter {
   backup(destination?: string): Promise<string>;
 }
 
+export type AdapterFactory = (options?: Record<string, any>) => StorageAdapter;
+
 export interface JsonDatabaseOptions {
   path?: string;
   autosave?: boolean;
   autosaveInterval?: number;
   storage?: StorageAdapter;
   ttlIntervalMs?: number;
+  adapter?: string;
+  adapterOptions?: Record<string, any>;
 }
 
 export interface DatabaseStats {
   path: string;
   collections: CollectionStats[];
   totalDocuments: number;
+}
+
+export interface DatabaseSnapshot {
+  meta: Record<string, any>;
+  collections: Record<string, {
+    name: string;
+    documents: any[];
+    indexes: Record<string, any>;
+    options: CollectionOptions;
+  }>;
 }
 
 export class FileStorageAdapter implements StorageAdapter {
@@ -327,6 +343,8 @@ export class JsonDatabase {
   purgeExpired(): Promise<void>;
   compact(): Promise<void>;
   watch<T extends Record<string, any> = Record<string, any>>(pattern?: string): WatchHandle<T>;
+  snapshot(): Promise<DatabaseSnapshot>;
+  restore(snapshot: DatabaseSnapshot): Promise<void>;
   transaction<R>(callback: (db: JsonDatabase) => R | Promise<R>): Promise<R>;
   stats(): Promise<DatabaseStats>;
   close(): Promise<void>;
@@ -347,3 +365,10 @@ export default JsonDatabase;
 export declare function createSchema<T extends Record<string, any>>(
   definition: SchemaDefinition<T> | SchemaFields<T>
 ): Schema<T>;
+
+export declare function registerAdapter(name: string, factory: AdapterFactory): void;
+export declare function listAdapters(): string[];
+export declare const adapters: {
+  createJsonAdapter: AdapterFactory;
+  createYamlAdapter: AdapterFactory;
+};

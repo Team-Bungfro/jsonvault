@@ -4,6 +4,7 @@ const path = require("path");
 const EventEmitter = require("events");
 const JsonCollection = require("./collection");
 const FileStorageAdapter = require("./storage/fileStorageAdapter");
+const { getAdapter } = require("./adapters");
 const debounce = require("./utils/debounce");
 const { cloneDeep } = require("./utils/objectUtils");
 
@@ -21,9 +22,25 @@ class JsonDatabase {
       ...options,
     };
 
-    this._storage =
-      options.storage ||
-      new FileStorageAdapter({ directory: this._options.path });
+    if (options.storage) {
+      this._storage = options.storage;
+    } else {
+      const adapterName = options.adapter || "json";
+      const adapterFactory = getAdapter(adapterName);
+
+      if (!adapterFactory) {
+        throw new Error(
+          `Unknown adapter "${adapterName}". Register it with registerAdapter().`,
+        );
+      }
+
+      const adapterOptions = {
+        directory: this._options.path,
+        ...(options.adapterOptions || {}),
+      };
+
+      this._storage = adapterFactory(adapterOptions);
+    }
 
     this._collections = new Map();
     this._dirtyCollections = new Set();
@@ -232,6 +249,37 @@ class JsonDatabase {
 
   async compact() {
     await this.save();
+  }
+
+  async snapshot() {
+    await this._autosave.flush();
+    const collections = this._createSnapshot();
+    const meta = cloneDeep(this._meta);
+    return {
+      meta,
+      collections,
+    };
+  }
+
+  async restore(snapshot) {
+    if (!snapshot || typeof snapshot !== "object") {
+      throw new Error("snapshot() expects an object created by JsonDatabase.snapshot()");
+    }
+
+    const collections = snapshot.collections || {};
+    const meta = snapshot.meta || {};
+
+    this._meta = {
+      ...this._meta,
+      ...meta,
+    };
+
+    await this._restoreSnapshot(collections);
+    await this._storage.writeMeta(this._meta);
+
+    for (const collection of this._collections.values()) {
+      this._emitChange(collection, { type: "restore" });
+    }
   }
 
   async transaction(callback) {
