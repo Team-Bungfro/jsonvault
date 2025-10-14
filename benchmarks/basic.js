@@ -5,7 +5,7 @@ const path = require("path");
 const fs = require("fs/promises");
 const { performance } = require("perf_hooks");
 
-const { JsonDatabase, createSchema } = require("../src");
+const { JsonDatabase, createSchema, Sort } = require("../src");
 
 const FORMATTER = new Intl.NumberFormat("en-US", {
   maximumFractionDigits: 2,
@@ -27,6 +27,21 @@ const createTempPath = async () => {
 const main = async () => {
   const TEMP_PATH = await createTempPath();
   const TOTAL_DOCS = Number(process.env.JSONVAULT_BENCH_DOCS) || 10_000;
+  const ADAPTER = process.env.JSONVAULT_BENCH_ADAPTER || "json";
+  const PARTITION_ENABLED = /^(1|true|yes)$/i.test(
+    process.env.JSONVAULT_BENCH_PARTITION || "false",
+  );
+
+  if (ADAPTER === "yaml") {
+    try {
+      require("yaml");
+    } catch (error) {
+      console.error(
+        "YAML adapter selected but 'yaml' package is not installed. Run `npm install yaml`.",
+      );
+      process.exit(1);
+    }
+  }
 
   const userSchema = createSchema({
     fields: {
@@ -42,9 +57,18 @@ const main = async () => {
   const db = await JsonDatabase.open({
     path: TEMP_PATH,
     autosave: false,
+    adapter: ADAPTER,
   });
-
-  const users = db.collection("users", { schema: userSchema });
+  
+  const users = db.collection("users", {
+    schema: userSchema,
+    partition: PARTITION_ENABLED
+      ? {
+          chunkSize: 2_000,
+          key: "age",
+        }
+      : undefined,
+  });
 
   const payload = [];
   for (let i = 0; i < TOTAL_DOCS; i += 1) {
@@ -56,7 +80,9 @@ const main = async () => {
     });
   }
 
-  console.log(`Running benchmark with ${TOTAL_DOCS} documents...\n`);
+  console.log(
+    `Running benchmark with ${TOTAL_DOCS.toLocaleString()} documents (adapter=${ADAPTER}, partition=${PARTITION_ENABLED})...\n`,
+  );
 
   let start = now();
   await users.insertMany(payload);
@@ -69,12 +95,20 @@ const main = async () => {
   log("findOne", findOneDuration);
 
   start = now();
-  const filtered = await users.find(
-    { age: { $gte: 40, $lt: 80 } },
-    { sort: { age: 1 }, limit: 100 },
-  );
+  const filterQuery = { age: { $gte: 40, $lt: 80 } };
+  const filtered = await users.find(filterQuery, {
+    sort: { age: Sort.ASC },
+    limit: 100,
+  });
   const findDuration = now() - start;
   log("find (100 match)", findDuration);
+
+  const plan = users.explain(filterQuery);
+  if (plan) {
+    console.log(
+      `  plan: scanned ${plan.scannedChunks}/${plan.totalChunks} chunks, ${plan.documentsScanned} docs`,
+    );
+  }
 
   start = now();
   await users.updateMany(
@@ -92,6 +126,9 @@ const main = async () => {
   console.log("\nSamples:");
   console.log("findOne result:", mid);
   console.log("find length:", filtered.length);
+  if (plan) {
+    console.log("plan:", plan);
+  }
   console.log("count:", count);
 
   await db.close();

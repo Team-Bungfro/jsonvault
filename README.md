@@ -84,6 +84,7 @@ npx jsonvault list ./data
 npx jsonvault stats ./data
 npx jsonvault dump ./data users --limit=5 --filter='{"active":true}'
 npx jsonvault export ./data users --format=csv --out=users.csv
+jsonvault stats ./data --adapter=yaml
 ```
 
 The CLI reads the database directory on disk, so set the path to the folder that holds `meta.json` and `collections/`.
@@ -104,6 +105,17 @@ await users.insertOne({ name: "Watcher Test" });
 // remember to clean up when you're done
 subscription.close();
 await db.close();
+```
+
+## Snapshots
+
+```js
+const snapshot = await db.snapshot();
+
+await users.insertOne({ name: "temporary" });
+
+// revert collections and metadata to the snapshot state
+await db.restore(snapshot);
 ```
 
 ## Schemas
@@ -189,6 +201,23 @@ console.log(plan.scannedChunks, "chunks scanned");
 When `chunkSize` is set, jsonvault writes collection data in chunk files (for example `logs.chunk-0001.json`). This keeps large collections manageable and speeds up incremental rewrites. Run `await db.save()` or `await db.compact()` periodically to rewrite stale chunks.
 
 Add `key` when you want range filters to scan fewer chunks. See `examples/partition-demo.js` for a complete script that generates partitioned data and prints the resulting chunk files.
+
+## Adapters
+
+```js
+const db = await JsonDatabase.open({
+  path: "./data-yaml",
+  adapter: "yaml",
+});
+
+// register custom adapters
+registerAdapter("memory", () => new InMemoryAdapter());
+
+const names = listAdapters();
+console.log(names);
+```
+
+`jsonvault` ships with `json` and `yaml` file adapters. YAML requires the optional `yaml` package (`npm install yaml`). Use `registerAdapter(name, factory)` to expose additional adapters (remote APIs, databases, etc.).
 
 ## Indexes
 
