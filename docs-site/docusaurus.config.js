@@ -7,11 +7,15 @@ const config = {
   deploymentBranch: "gh-pages",
   url: "https://team-bungfro.github.io",
   baseUrl: "/jsonvault/",
-  onBrokenLinks: "throw",
-  onBrokenMarkdownLinks: "warn",
   favicon: "img/favicon.ico",
   organizationName: "team-bungfro",
   projectName: "jsonvault",
+  onBrokenLinks: "warn",
+  markdown: {
+    hooks: {
+      onBrokenMarkdownLinks: "warn"
+    },
+  },
 
   i18n: {
     defaultLocale: "en",

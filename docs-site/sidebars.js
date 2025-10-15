@@ -33,6 +33,13 @@ const sidebars = {
         "guides/cli",
       ],
     },
+    {
+      type: "category",
+      label: "Reference",
+      items: [
+        "reference/configuration",
+      ],
+    },
   ],
 };
 

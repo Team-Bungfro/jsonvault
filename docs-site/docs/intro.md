@@ -13,4 +13,4 @@ This documentation walks you through:
 - Managing data lifecycle with migrations, backups, partitions, and TTL.
 - Operating JSONVault in CI/CD pipelines with the CLI and change log.
 
-If you only have a minute, start with **[Getting Started → Quickstart](getting-started/quickstart.md)**. For a feature tour, skim **Concepts** and **How-to Guides**.
+If you only have a minute, start with **[Getting Started → Quickstart](getting-started/quickstart)**. For a feature tour, skim **Concepts** and **How-to Guides**.
