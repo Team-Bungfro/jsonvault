@@ -5,6 +5,7 @@
 [![npm version](https://img.shields.io/npm/v/jsonvault.svg?style=flat)](https://www.npmjs.com/package/jsonvault)
 [![Node](https://img.shields.io/badge/node->=18-brightgreen.svg?style=flat)](https://nodejs.org/)
 [![License](https://img.shields.io/npm/l/jsonvault.svg?style=flat)](LICENSE)
+[![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/G2G21MUP3D)
 
 ---
 
