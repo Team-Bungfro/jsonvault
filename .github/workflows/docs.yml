@@ -42,3 +42,4 @@ jobs:
           publish_dir: docs-site/build
           publish_branch: gh-pages
           commit_message: "docs: deploy from ${{ github.ref }}"
+          cname: jsonvault.dev
