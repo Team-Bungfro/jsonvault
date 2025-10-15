@@ -1,0 +1,125 @@
+---
+sidebar_position: 2
+title: Quickstart
+---
+
+import Tabs from '@theme/Tabs';
+import TabItem from '@theme/TabItem';
+
+```mermaid
+flowchart LR
+  subgraph App
+    A[JsonDatabase.open] --> B[Collection API]
+    B --> C[insert/find/update/delete]
+    B --> D[Hooks & Schemas]
+  end
+  App -- change events --> E[(Change Log)]
+  App -- CLI --> F{{JSONVault}}
+```
+
+## 1. Open the database
+
+Create a `JsonDatabase` instance pointing at a folder on disk:
+
+```js title="db.js"
+const { JsonDatabase } = require("jsonvault");
+
+async function openDb() {
+  return JsonDatabase.open({
+    path: "./data",
+    changeLog: { path: "./data/changelog.jsonl" },
+    ttlIntervalMs: 30_000,
+  });
+}
+```
+
+## 2. Define (optional) schema and hooks
+
+```js title="users.js"
+const { createSchema } = require("jsonvault");
+
+const userSchema = createSchema({
+  fields: {
+    name: { type: "string", required: true },
+    email: {
+      type: "string",
+      required: true,
+      pattern: ".+@.+\\..+",
+      transform: (value) => value.toLowerCase(),
+    },
+    roles: { type: "array", items: "string", default: () => [] },
+  },
+  allowAdditional: false,
+});
+
+function attachUsers(db) {
+  return db.collection("users", {
+    schema: userSchema,
+    hooks: {
+      beforeInsert(doc) {
+        doc.slug = doc.name.toLowerCase().replace(/\s+/g, "-");
+      },
+      afterInsert(doc) {
+        console.log("new user", doc._id);
+      },
+    },
+  });
+}
+```
+
+## 3. Run queries
+
+```js title="app.js"
+const db = await openDb();
+const users = attachUsers(db);
+
+await users.insertOne({ name: "Ada Lovelace", email: "ADA@example.com" });
+await users.updateOne({ email: "ada@example.com" }, { $set: { active: true } });
+
+const admins = await users.find({ roles: { $contains: "admin" } });
+const activeTotal = await users.count({ active: true });
+
+await db.save();
+await db.close();
+```
+
+## 4. Explore other entry points
+
+<Tabs>
+  <TabItem value="sql" label="SQL Helper">
+
+```js
+const highValue = await db.sql`
+  SELECT orders.id AS orderId, users.email
+  FROM orders
+  JOIN users ON orders.userId = users._id
+  WHERE orders.total > 1000
+  ORDER BY orderId
+`;
+```
+
+  </TabItem>
+  <TabItem value="cli" label="CLI">
+
+```bash
+npx jsonvault migrate ./data up --dir=./migrations
+npx jsonvault query ./data "SELECT userId, SUM(total) AS spend FROM orders GROUP BY userId"
+```
+
+  </TabItem>
+  <TabItem value="watch" label="Change Log / Watcher">
+
+```js
+const tail = await db.changeLog.read({ from: 42 });
+const watcher = db.watch("orders/**");
+watcher.on("change", console.log);
+```
+
+  </TabItem>
+</Tabs>
+
+## What’s next?
+
+- Dive into **[Concepts](../concepts/data-model)** to understand collections, indexes, and partitions.
+- Follow the **[Migrations guide](../concepts/migrations)** to manage schema drift safely.
+- Check **[Reference → Configuration](../reference/configuration)** for all available options.
