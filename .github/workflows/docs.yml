@@ -1,0 +1,44 @@
+# .github/workflows/docs.yml
+name: Docs
+on:
+  push:
+    branches: [ main, v* ]
+    tags: [ v* ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+          cache-dependency-path: docs-site/package-lock.json
+
+      - name: Respect packageManager (optional)
+        working-directory: docs-site
+        run: |
+          node -e "try{const v=require('./package.json').packageManager?.split('@')[1]; if(v) console.log('Using npm@'+v) || require('child_process').execSync('npm i -g npm@'+v)}catch(e){}"
+
+      - name: Install deps (prefer ci)
+        working-directory: docs-site
+        run: npm ci || npm install --no-audit --no-fund
+
+      - name: Build Docusaurus
+        working-directory: docs-site
+        run: npm run build
+
+      - name: Deploy to gh-pages
+        uses: peaceiris/actions-gh-pages@v3
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: docs-site/build
+          publish_branch: gh-pages
+          commit_message: "docs: deploy from ${{ github.ref }}"

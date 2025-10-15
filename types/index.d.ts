@@ -15,9 +15,14 @@ export interface OperatorExpression<T = any> {
   $contains?: T extends (infer U)[] ? U | U[] : T;
   $startsWith?: string;
   $endsWith?: string;
+  $all?: T extends (infer U)[] ? U[] : any[];
+  $elemMatch?: T extends (infer U)[] ? Filter<U & Record<string, any>> : Filter<Record<string, any>>;
+  $not?: OperatorExpression<T> | T | RegExp;
+  $mod?: [number, number];
+  $type?: string | string[];
 }
 
-export type LogicalFilter<T> = {
+export type LogicalFilter<T extends Record<string, any> = Record<string, any>> = {
   $and?: Array<Filter<T>>;
   $or?: Array<Filter<T>>;
   $not?: Filter<T>;
@@ -86,7 +91,7 @@ export interface SchemaFieldBase<TValue = any, TDocument extends Record<string, 
 export interface SchemaArrayField<TValue = any, TDocument extends Record<string, any> = Record<string, any>>
   extends SchemaFieldBase<TValue[], TDocument> {
   type: "array";
-  items?: SchemaFieldDefinition<any, TDocument>;
+  items?: SchemaFieldDefinition<TDocument> | SchemaTypeName;
 }
 
 export interface SchemaObjectField<TValue = any, TDocument extends Record<string, any> = Record<string, any>>
@@ -153,6 +158,19 @@ export interface WatchHandle<T extends Record<string, any> = Record<string, any>
   once(event: "change", listener: (event: ChangeEvent<T>) => void): this;
   off(event: "change", listener: (event: ChangeEvent<T>) => void): this;
   close(): void;
+}
+
+export interface ChangeLogEntry<T extends Record<string, any> = Record<string, any>> extends ChangeEvent<T> {
+  seq: number;
+}
+
+export interface ChangeLogReadOptions {
+  from?: number;
+}
+
+export interface ChangeLog<T extends Record<string, any> = Record<string, any>> {
+  read(options?: ChangeLogReadOptions): Promise<ChangeLogEntry<T>[]>;
+  clear(): Promise<void>;
 }
 
 export interface PartitionPlan {
@@ -267,6 +285,7 @@ export class JsonCollection<T extends Record<string, any> = Record<string, any>>
   dropIndex(field: keyof T | string): Promise<void>;
   getStats(): CollectionStats;
   explain(filter?: Filter<T>): PartitionPlan | null;
+  stream(filter?: Filter<T>, options?: QueryOptions<T>): AsyncIterable<T>;
 }
 
 export interface StorageAdapter {
@@ -287,6 +306,11 @@ export interface StorageAdapter {
 
 export type AdapterFactory = (options?: Record<string, any>) => StorageAdapter;
 
+export interface ChangeLogOptions {
+  path?: string;
+  directory?: string;
+}
+
 export interface JsonDatabaseOptions {
   path?: string;
   autosave?: boolean;
@@ -295,6 +319,7 @@ export interface JsonDatabaseOptions {
   ttlIntervalMs?: number;
   adapter?: string;
   adapterOptions?: Record<string, any>;
+  changeLog?: boolean | ChangeLogOptions;
 }
 
 export interface DatabaseStats {
@@ -311,6 +336,19 @@ export interface DatabaseSnapshot {
     indexes: Record<string, any>;
     options: CollectionOptions;
   }>;
+}
+
+export interface CompileSpec<T extends Record<string, any> = Record<string, any>> {
+  collection: string;
+  filter?: Filter<T>;
+  options?: QueryOptions<T>;
+}
+
+export interface CompiledQuery<T extends Record<string, any> = Record<string, any>> {
+  type: string;
+  collection: string;
+  execute(db: JsonDatabase, options?: QueryOptions<T>): AsyncIterable<T>;
+  explain?(db: JsonDatabase): PartitionPlan | null;
 }
 
 export class FileStorageAdapter implements StorageAdapter {
@@ -343,11 +381,18 @@ export class JsonDatabase {
   purgeExpired(): Promise<void>;
   compact(): Promise<void>;
   watch<T extends Record<string, any> = Record<string, any>>(pattern?: string): WatchHandle<T>;
+  readonly changeLog?: ChangeLog;
   snapshot(): Promise<DatabaseSnapshot>;
   restore(snapshot: DatabaseSnapshot): Promise<void>;
+  compile<T extends Record<string, any> = Record<string, any>>(input: string | CompileSpec<T>): CompiledQuery<T>;
+  stream<T extends Record<string, any> = Record<string, any>>(query: CompiledQuery<T>, options?: QueryOptions<T>): AsyncIterable<T>;
+  sql<TResult = any>(strings: TemplateStringsArray | string, ...values: any[]): Promise<TResult[]>;
   transaction<R>(callback: (db: JsonDatabase) => R | Promise<R>): Promise<R>;
   stats(): Promise<DatabaseStats>;
   close(): Promise<void>;
+  getAppliedMigrations(): Array<{ id: string; appliedAt: string; description?: string | null }>;
+  recordMigrationApplied(id: string, info?: { description?: string | null; appliedAt?: string }): Promise<void>;
+  recordMigrationReverted(id: string): Promise<void>;
 }
 
 export declare const queryDocuments: <T extends Record<string, any>>(
@@ -371,4 +416,58 @@ export declare function listAdapters(): string[];
 export declare const adapters: {
   createJsonAdapter: AdapterFactory;
   createYamlAdapter: AdapterFactory;
+};
+
+export interface MigrationInfo {
+  id: string;
+  description?: string | null;
+}
+
+export interface AppliedMigrationInfo extends MigrationInfo {
+  appliedAt: string;
+}
+
+export interface MigrationOptions {
+  directory?: string;
+  to?: string;
+  step?: number;
+  dryRun?: boolean;
+}
+
+export interface MigrationResult {
+  ran: MigrationInfo[];
+  dryRun: boolean;
+}
+
+export interface CreateMigrationOptions {
+  directory?: string;
+  name?: string;
+  template?: (id: string) => string;
+}
+
+export interface CreateMigrationResult {
+  id: string;
+  file: string;
+}
+
+export interface MigrationStatus {
+  applied: AppliedMigrationInfo[];
+  pending: MigrationInfo[];
+}
+
+export declare function loadMigrations(directory?: string): Promise<Array<MigrationInfo & {
+  file: string;
+  up: (db: JsonDatabase) => any;
+  down?: (db: JsonDatabase) => any;
+}>>;
+export declare function migrateUp(db: JsonDatabase, options?: MigrationOptions): Promise<MigrationResult>;
+export declare function migrateDown(db: JsonDatabase, options?: MigrationOptions): Promise<MigrationResult>;
+export declare function migrationStatus(db: JsonDatabase, options?: { directory?: string }): Promise<MigrationStatus>;
+export declare function createMigration(options?: CreateMigrationOptions): Promise<CreateMigrationResult>;
+export declare const migrations: {
+  loadMigrations: typeof loadMigrations;
+  migrateUp: typeof migrateUp;
+  migrateDown: typeof migrateDown;
+  migrationStatus: typeof migrationStatus;
+  createMigration: typeof createMigration;
 };

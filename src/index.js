@@ -12,6 +12,7 @@ const {
   createJsonAdapter,
   createYamlAdapter,
 } = require("./adapters");
+const migrations = require("./migrations");
 
 module.exports = {
   JsonDatabase,
@@ -29,4 +30,10 @@ module.exports = {
   },
   queryDocuments,
   Sort,
+  migrations,
+  migrateUp: migrations.migrateUp,
+  migrateDown: migrations.migrateDown,
+  migrationStatus: migrations.migrationStatus,
+  loadMigrations: migrations.loadMigrations,
+  createMigration: migrations.createMigration,
 };

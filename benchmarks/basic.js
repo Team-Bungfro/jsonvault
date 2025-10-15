@@ -118,6 +118,28 @@ const main = async () => {
   const updateDuration = now() - start;
   log("updateMany", updateDuration);
 
+  const compiledFilter = db.compile({
+    collection: "users",
+    filter: { age: { $gte: 40, $lt: 80 } },
+    options: { sort: { age: Sort.ASC }, limit: 100 },
+  });
+  start = now();
+  let streamCount = 0;
+  for await (const row of db.stream(compiledFilter)) {
+    streamCount += 1;
+  }
+  const streamDuration = now() - start;
+  log("stream(filter)", streamDuration);
+
+  const compiledExpression = db.compile("$.users[?(@.age >= 40)]");
+  start = now();
+  let exprCount = 0;
+  for await (const row of db.stream(compiledExpression)) {
+    exprCount += 1;
+  }
+  const exprDuration = now() - start;
+  log("stream(expression)", exprDuration);
+
   start = now();
   const count = await users.count({ active: true });
   const countDuration = now() - start;
@@ -130,6 +152,8 @@ const main = async () => {
     console.log("plan:", plan);
   }
   console.log("count:", count);
+  console.log("stream(filter) count:", streamCount);
+  console.log("stream(expression) count:", exprCount);
 
   await db.close();
   await fs.rm(TEMP_PATH, { recursive: true, force: true });

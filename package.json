@@ -21,14 +21,15 @@
     "bin",
     "src",
     "types",
-    "examples",
     "README.md",
-    "LICENSE",
-    "docs"
+    "LICENSE"
   ],
   "scripts": {
     "test": "node --test ./test/index.test.js",
-    "bench": "node ./benchmarks/basic.js"
+    "bench": "node ./benchmarks/basic.js",
+    "docs:start": "npm --prefix docs-site start",
+    "docs:build": "npm --prefix docs-site run build",
+    "docs:serve": "npm --prefix docs-site run serve"
   },
   "engines": {
     "node": ">=16.15.0"

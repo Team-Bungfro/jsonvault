@@ -578,6 +578,16 @@ class JsonCollection {
     return results.map((doc) => cloneDeep(doc));
   }
 
+  stream(filter = {}, options = {}) {
+    const self = this;
+    return (async function* streamGenerator() {
+      const docs = await self.find(filter, options);
+      for (const doc of docs) {
+        yield doc;
+      }
+    })();
+  }
+
   async findOne(filter = {}, options = {}) {
     const [first] = await this.find(filter, { ...options, limit: 1 });
     return first || null;
