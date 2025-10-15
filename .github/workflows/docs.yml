@@ -1,17 +1,26 @@
+# .github/workflows/docs.yml
 name: Docs
 
 on:
   push:
-    branches: [ v1.x.x ]
+    branches:
+      - main
+      - v*           
+    tags:
+      - v*           
   workflow_dispatch:
+
+permissions:
+  contents: write      
 
 jobs:
   build-and-deploy:
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -32,4 +41,4 @@ jobs:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           publish_dir: docs-site/build
           publish_branch: gh-pages
-          commit_message: "chore(docs): deploy"
+          commit_message: "docs: deploy from ${{ github.ref }}"
