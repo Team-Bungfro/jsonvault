@@ -1,0 +1,35 @@
+name: Docs
+
+on:
+  push:
+    branches: [ v1.x.x ]
+  workflow_dispatch:
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install deps
+        working-directory: docs-site
+        run: npm ci
+
+      - name: Build Docusaurus
+        working-directory: docs-site
+        run: npm run build
+
+      - name: Deploy to gh-pages
+        uses: peaceiris/actions-gh-pages@v3
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: docs-site/build
+          publish_branch: gh-pages
+          commit_message: "chore(docs): deploy"

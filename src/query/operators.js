@@ -59,6 +59,27 @@ const scalarMatch = (docValue, expected) => {
   return false;
 };
 
+const normalizeModulo = (value, divisor) => {
+  const remainder = value % divisor;
+  return remainder < 0 ? remainder + Math.abs(divisor) : remainder;
+};
+
+const resolveType = (value) => {
+  if (value === null) {
+    return "null";
+  }
+  if (Array.isArray(value)) {
+    return "array";
+  }
+  if (value instanceof Date) {
+    return "date";
+  }
+  if (value instanceof RegExp) {
+    return "regexp";
+  }
+  return typeof value;
+};
+
 const basicOperator = {
   $eq: (value, operand) => scalarMatch(value, operand),
   $ne: (value, operand) => !scalarMatch(value, operand),
@@ -120,11 +141,69 @@ const basicOperator = {
     }
     return false;
   },
+  $all: (value, operand) => {
+    if (!Array.isArray(value)) {
+      return false;
+    }
+    const expected = ensureArray(operand);
+    return expected.every((item) =>
+      value.some((entry) => scalarMatch(entry, item)),
+    );
+  },
+  $elemMatch: (value, operand) => {
+    if (!Array.isArray(value) || !operand || typeof operand !== "object") {
+      return false;
+    }
+    return value.some((item) => matchSubFilter(item, operand));
+  },
+  $mod: (value, operand) => {
+    if (typeof value !== "number") {
+      return false;
+    }
+    const divisors = ensureArray(operand);
+    if (divisors.length < 2) {
+      return false;
+    }
+    const divisor = Number(divisors[0]);
+    const expected = Number(divisors[1]);
+    if (!Number.isFinite(divisor) || divisor === 0 || !Number.isFinite(expected)) {
+      return false;
+    }
+    return normalizeModulo(value, divisor) === normalizeModulo(expected, divisor);
+  },
+  $type: (value, operand) => {
+    const types = Array.isArray(operand) ? operand : [operand];
+    return types.some((entry) => {
+      const expected = String(entry).toLowerCase();
+      return resolveType(value) === expected;
+    });
+  },
 };
 
 const applyOperators = (value, query) => {
   for (const [operator, operand] of Object.entries(query)) {
     if (operator === "$options") {
+      continue;
+    }
+
+    if (operator === "$not") {
+      if (operand instanceof RegExp) {
+        if (basicOperator.$regex(value, operand)) {
+          return false;
+        }
+        continue;
+      }
+
+      if (operand && typeof operand === "object" && isOperatorObject(operand)) {
+        if (applyOperators(value, operand)) {
+          return false;
+        }
+        continue;
+      }
+
+      if (scalarMatch(value, operand)) {
+        return false;
+      }
       continue;
     }
 

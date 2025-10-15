@@ -5,8 +5,18 @@ const EventEmitter = require("events");
 const JsonCollection = require("./collection");
 const FileStorageAdapter = require("./storage/fileStorageAdapter");
 const { getAdapter } = require("./adapters");
+const { compileQuery } = require("./query/compiler");
 const debounce = require("./utils/debounce");
 const { cloneDeep } = require("./utils/objectUtils");
+const { runSql } = require("./sql/sqlEngine");
+const FileChangeLog = require("./changelog/fileChangeLog");
+
+const debugWatch = (...parts) => {
+  if (process.env.JSONVAULT_DEBUG_WATCH) {
+    // eslint-disable-next-line no-console
+    console.log("[jsonvault:watch]", ...parts);
+  }
+};
 
 const DEFAULT_OPTIONS = {
   path: path.resolve(process.cwd(), "json-storage"),
@@ -51,6 +61,8 @@ class JsonDatabase {
     this._ttlTimer = null;
     this._ttlRunning = false;
     this._watchers = new Set();
+    this._fsWatcherCleanup = null;
+    this._changeLog = null;
   }
 
   static async open(options = {}) {
@@ -61,7 +73,8 @@ class JsonDatabase {
 
   async _init() {
     await this._storage.init();
-    this._meta = await this._storage.readMeta();
+    this._meta = this._normalizeMeta(await this._storage.readMeta());
+    await this._initChangeLog();
     const collections = await this._storage.listCollections();
 
     for (const name of collections) {
@@ -85,6 +98,88 @@ class JsonDatabase {
 
     this._collections.set(name, collection);
     return collection;
+  }
+
+  _normalizeMeta(meta = {}) {
+    const normalized = {
+      migrations: { applied: [] },
+      ...meta,
+    };
+
+    if (
+      !normalized.migrations ||
+      !Array.isArray(normalized.migrations.applied)
+    ) {
+      normalized.migrations = { applied: [] };
+    }
+
+    return normalized;
+  }
+
+  async _initChangeLog() {
+    const spec = this._options.changeLog;
+    if (!spec) {
+      return;
+    }
+
+    const basePath = this._options.path;
+    const directory =
+      typeof spec === "object" && spec.directory
+        ? spec.directory
+        : path.join(basePath, "changelog");
+    const file =
+      typeof spec === "object" && spec.path
+        ? spec.path
+        : path.join(directory, "log.jsonl");
+
+    this._changeLog = await FileChangeLog.create({ file });
+  }
+
+  get changeLog() {
+    return this._changeLog;
+  }
+
+  getAppliedMigrations() {
+    const applied = this._meta?.migrations?.applied;
+    if (!Array.isArray(applied)) {
+      return [];
+    }
+    return applied.map((entry) => ({ ...entry }));
+  }
+
+  async recordMigrationApplied(id, info = {}) {
+    const applied = this.getAppliedMigrations();
+    if (applied.some((entry) => entry.id === id)) {
+      return;
+    }
+
+    const appliedAt = info.appliedAt || new Date().toISOString();
+    applied.push({
+      id,
+      appliedAt,
+      description:
+        info.description === undefined ? null : info.description,
+    });
+
+    const nextMeta = {
+      ...this._meta,
+      migrations: { applied },
+    };
+
+    this._meta = this._normalizeMeta(await this._storage.writeMeta(nextMeta));
+  }
+
+  async recordMigrationReverted(id) {
+    const applied = this.getAppliedMigrations().filter(
+      (entry) => entry.id !== id,
+    );
+
+    const nextMeta = {
+      ...this._meta,
+      migrations: { applied },
+    };
+
+    this._meta = this._normalizeMeta(await this._storage.writeMeta(nextMeta));
   }
 
   collection(name, runtime = {}) {
@@ -138,7 +233,8 @@ class JsonDatabase {
   async _notifyChange(collection, change = {}) {
     this._dirtyCollections.add(collection.name);
     this._scheduleAutosave();
-    this._emitChange(collection, change);
+    const event = this._emitChange(collection, change);
+    await this._appendChangeLog(event);
   }
 
   watch(pattern = "**") {
@@ -149,9 +245,15 @@ class JsonDatabase {
     const entry = { pattern, regex, emitter };
     emitter.close = () => {
       this._watchers.delete(entry);
+      debugWatch("watch removed", pattern, "remaining", this._watchers.size);
+      if (this._watchers.size === 0) {
+        this._stopFsWatcher();
+      }
     };
 
     this._watchers.add(entry);
+    this._ensureFsWatcher();
+    debugWatch("watch added", pattern, "total", this._watchers.size);
     return emitter;
   }
 
@@ -175,10 +277,6 @@ class JsonDatabase {
   }
 
   _emitChange(collection, change) {
-    if (!this._watchers || this._watchers.size === 0) {
-      return;
-    }
-
     const event = {
       collection: collection.name,
       primaryKey: collection.primaryKey,
@@ -207,12 +305,10 @@ class JsonDatabase {
     appendFromDocs(event.deleted);
 
     event.paths = Array.from(paths);
-
-    for (const watcher of this._watchers) {
-      if (event.paths.some((path) => watcher.regex.test(path))) {
-        watcher.emitter.emit("change", { ...event });
-      }
+    if (this._watchers && this._watchers.size > 0) {
+      this._notifyWatchers(paths, event);
     }
+    return event;
   }
 
   _scheduleAutosave() {
@@ -236,7 +332,190 @@ class JsonDatabase {
 
     this._dirtyCollections.clear();
     this._meta.updatedAt = new Date().toISOString();
-    await this._storage.writeMeta(this._meta);
+    this._meta = this._normalizeMeta(await this._storage.writeMeta(this._meta));
+  }
+
+  _notifyWatchers(paths, event) {
+    if (!this._watchers || this._watchers.size === 0) {
+      return;
+    }
+
+    const list = Array.from(paths);
+    const payload = { ...event, paths: list };
+    debugWatch("notify", payload);
+
+    for (const watcher of this._watchers) {
+      if (list.some((path) => watcher.regex.test(path))) {
+        watcher.emitter.emit("change", { ...payload });
+      }
+    }
+  }
+
+  async _appendChangeLog(event) {
+    if (!this._changeLog || !event) {
+      return;
+    }
+
+    try {
+      await this._changeLog.append(cloneDeep(event));
+    } catch (error) {
+      if (process.env.JSONVAULT_DEBUG_WATCH) {
+        // eslint-disable-next-line no-console
+        console.error("[jsonvault:changelog] append failed", error);
+      }
+    }
+  }
+
+  _ensureFsWatcher() {
+    if (this._fsWatcherCleanup || typeof this._storage.watch !== "function") {
+      return;
+    }
+
+    try {
+      this._fsWatcherCleanup = this._storage.watch((event) => {
+        this._emitExternalChange(event);
+      });
+      debugWatch("fs watcher attached");
+    } catch (error) {
+      debugWatch("fs watcher failed", error.message);
+      this._fsWatcherCleanup = null;
+    }
+  }
+
+  _stopFsWatcher() {
+    if (!this._fsWatcherCleanup) {
+      return;
+    }
+    try {
+      this._fsWatcherCleanup();
+    } catch (error) {
+      // ignore
+    }
+    this._fsWatcherCleanup = null;
+    debugWatch("fs watcher removed");
+  }
+
+  _emitExternalChange(event) {
+    if (!event) {
+      return;
+    }
+
+    debugWatch("external event", event);
+
+    const paths = new Set();
+    let collection = null;
+
+    if (event.filename) {
+      const filename = String(event.filename);
+      const collectionMatch = filename.match(/^(.*)\.collection\./);
+      if (collectionMatch) {
+        collection = collectionMatch[1];
+        paths.add(collection);
+      }
+
+      const chunkMatch = filename.match(/^(.*)\.chunk-/);
+      if (!collection && chunkMatch) {
+        collection = chunkMatch[1];
+        paths.add(collection);
+      }
+
+      paths.add(filename);
+    }
+
+    if (paths.size === 0) {
+      paths.add("external");
+    }
+
+    const payload = {
+      type: "external",
+      source: "filesystem",
+      collection,
+      timestamp: new Date().toISOString(),
+      event,
+    };
+
+    this._notifyWatchers(paths, payload);
+  }
+
+  _notifyWatchers(paths, event) {
+    if (!this._watchers || this._watchers.size === 0) {
+      return;
+    }
+
+    const list = Array.from(paths);
+    const payload = { ...event, paths: list };
+
+    for (const watcher of this._watchers) {
+      if (list.some((path) => watcher.regex.test(path))) {
+        watcher.emitter.emit("change", { ...payload });
+      }
+    }
+  }
+
+  _ensureFsWatcher() {
+    if (this._fsWatcherCleanup || typeof this._storage.watch !== "function") {
+      return;
+    }
+
+    try {
+      this._fsWatcherCleanup = this._storage.watch((event) => {
+        this._emitExternalChange(event);
+      });
+    } catch (error) {
+      this._fsWatcherCleanup = null;
+    }
+  }
+
+  _stopFsWatcher() {
+    if (!this._fsWatcherCleanup) {
+      return;
+    }
+    try {
+      this._fsWatcherCleanup();
+    } catch (error) {
+      // ignore
+    }
+    this._fsWatcherCleanup = null;
+  }
+
+  _emitExternalChange(event) {
+    if (!event) {
+      return;
+    }
+
+    const paths = new Set();
+    let collection = null;
+
+    if (event.filename) {
+      const filename = String(event.filename);
+      const collectionMatch = filename.match(/^(.*)\.collection\./);
+      if (collectionMatch) {
+        collection = collectionMatch[1];
+        paths.add(collection);
+      }
+
+      const chunkMatch = filename.match(/^(.*)\.chunk-/);
+      if (!collection && chunkMatch) {
+        collection = chunkMatch[1];
+        paths.add(collection);
+      }
+
+      paths.add(filename);
+    }
+
+    if (paths.size === 0) {
+      paths.add("external");
+    }
+
+    const payload = {
+      type: "external",
+      source: "filesystem",
+      collection,
+      timestamp: new Date().toISOString(),
+      event,
+    };
+
+    this._notifyWatchers(paths, payload);
   }
 
   async backup(destination) {
@@ -269,17 +548,32 @@ class JsonDatabase {
     const collections = snapshot.collections || {};
     const meta = snapshot.meta || {};
 
-    this._meta = {
+    this._meta = this._normalizeMeta({
       ...this._meta,
       ...meta,
-    };
+    });
 
     await this._restoreSnapshot(collections);
-    await this._storage.writeMeta(this._meta);
+    this._meta = this._normalizeMeta(await this._storage.writeMeta(this._meta));
 
     for (const collection of this._collections.values()) {
       this._emitChange(collection, { type: "restore" });
     }
+  }
+
+  compile(input) {
+    return compileQuery(input);
+  }
+
+  stream(compiled, options = {}) {
+    if (!compiled || typeof compiled.execute !== "function") {
+      throw new Error("db.stream requires a compiled query from db.compile()");
+    }
+    return compiled.execute(this, options);
+  }
+
+  sql(strings, ...values) {
+    return runSql(this, strings, ...values);
   }
 
   async transaction(callback) {
@@ -337,6 +631,9 @@ class JsonDatabase {
     await this._autosave.flush();
     await this.save();
     this._stopTtlTimer();
+    if (this._changeLog) {
+      await this._changeLog.close();
+    }
     this._state = "closed";
   }
 

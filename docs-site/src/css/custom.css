@@ -1,0 +1,28 @@
+@import url("https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap");
+
+:root {
+  --ifm-color-primary: #1f7aed;
+  --ifm-color-primary-dark: #1663c2;
+  --ifm-color-primary-darker: #1358b0;
+  --ifm-color-primary-darkest: #0f468b;
+  --ifm-color-primary-light: #3a8df0;
+  --ifm-color-primary-lighter: #579ef4;
+  --ifm-color-primary-lightest: #7cb3f7;
+  --ifm-code-font-size: 95%;
+  --ifm-font-family-base: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+.navbar__title {
+  font-weight: 700;
+}
+
+.button--outline.button--secondary {
+  color: #fff;
+  border-color: rgba(255, 255, 255, 0.7);
+}
+
+.button--outline.button--secondary:hover {
+  background: rgba(255, 255, 255, 0.12);
+}
+:root {
+}

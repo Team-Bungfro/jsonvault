@@ -10,6 +10,9 @@ const DEFAULT_META = {
   version: 1,
   createdAt: null,
   updatedAt: null,
+  migrations: {
+    applied: [],
+  },
 };
 
 const defaultSerializer = {
@@ -41,6 +44,8 @@ const removeDirIfExists = async (dir) => {
     }
   }
 };
+
+
 
 const coerceRangeValue = (value) => {
   if (value instanceof Date) {
@@ -271,6 +276,10 @@ class FileStorageAdapter {
   async createTempWorkspace(prefix = "jsondb") {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), `${prefix}-`));
     return tempDir;
+  }
+
+  watch() {
+    return () => {};
   }
 }
 

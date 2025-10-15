@@ -1,8 +1,12 @@
 .DS_Store
 .examples/
 node_modules/
+docs-site/node_modules/
+docs-site/.docusaurus/
+docs-site/build/
 coverage/
 dist/
 json-storage/
 test/manual_test.js
-data/
+data
+.env
