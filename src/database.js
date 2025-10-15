@@ -123,16 +123,22 @@ class JsonDatabase {
     }
 
     const basePath = this._options.path;
-    const directory =
-      typeof spec === "object" && spec.directory
-        ? spec.directory
-        : path.join(basePath, "changelog");
-    const file =
-      typeof spec === "object" && spec.path
-        ? spec.path
-        : path.join(directory, "log.jsonl");
+    const config = typeof spec === "object" ? { ...spec } : {};
 
-    this._changeLog = await FileChangeLog.create({ file });
+    const directory =
+      config.directory || path.join(basePath, "changelog");
+    const file =
+      config.path || path.join(directory, "log.jsonl");
+
+    const changeLogOptions = {
+      file,
+      maxEntries: config.maxEntries,
+      maxSize: config.maxSize,
+      autoArchive: config.autoArchive,
+      archiveDirectory: config.archiveDirectory,
+    };
+
+    this._changeLog = await FileChangeLog.create(changeLogOptions);
   }
 
   get changeLog() {

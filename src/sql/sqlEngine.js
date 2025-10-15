@@ -12,6 +12,43 @@ const TRUTHY_KEYWORDS = new Map([
   ["FALSE", false],
 ]);
 
+const wrapMarker = Symbol("jsonvaultSqlError");
+const SNIPPET_LENGTH = 80;
+
+const formatSnippet = (text = "") => {
+  const trimmed = text.trim();
+  if (trimmed.length <= SNIPPET_LENGTH) {
+    return trimmed;
+  }
+  return `${trimmed.slice(0, SNIPPET_LENGTH - 3)}...`;
+};
+
+const wrapSqlError = (error, clause, text) => {
+  if (!error) {
+    return error;
+  }
+
+  if (error[wrapMarker]) {
+    return error;
+  }
+
+  const snippet = formatSnippet(text);
+  const clauseLabel = clause ? `${clause} clause` : "SQL";
+  const suffix = snippet ? ` near "${snippet}"` : "";
+  const wrapped = new Error(`${error.message} (${clauseLabel}${suffix})`);
+  wrapped.cause = error;
+  wrapped[wrapMarker] = true;
+  return wrapped;
+};
+
+const withClause = (clause, text, fn) => {
+  try {
+    return fn();
+  } catch (error) {
+    throw wrapSqlError(error, clause, text);
+  }
+};
+
 const AGGREGATE_FACTORIES = {
   SUM() {
     return {
@@ -416,40 +453,88 @@ const parseWhere = (input, params) => {
     return null;
   }
 
-  const tokens = tokenize(input);
-  const clauses = [];
-  let index = 0;
-
-  while (index < tokens.length) {
-    const { clause, nextIndex } = parseConditionTokens(tokens, index, params);
-    clauses.push(clause);
-    index = nextIndex;
-
-    if (index >= tokens.length) {
-      break;
+  try {
+    const tokens = tokenize(input);
+    if (tokens.length === 0) {
+      return null;
     }
 
-    const separator = tokens[index];
-    if (
-      separator.type === "keyword" &&
-      separator.value === "AND"
-    ) {
-      index += 1;
-      continue;
+    const parsed = parseOrConditions(tokens, 0, params);
+    if (parsed.nextIndex < tokens.length) {
+      const remaining = tokens.slice(parsed.nextIndex).map((token) => token.value || token.type);
+      throw new Error(`Unexpected tokens ${remaining.join(" ")}`);
     }
-    throw new Error("Only AND is supported between WHERE conditions");
+    return parsed.clause;
+  } catch (error) {
+    throw wrapSqlError(error, "WHERE", input);
+  }
+};
+
+function parseConditionGroup(tokens, index, params) {
+  const token = tokens[index];
+  if (!token) {
+    throw new Error("Unexpected end of WHERE clause");
   }
 
-  if (clauses.length === 0) {
-    return null;
+  if (token.type === "(") {
+    const inner = parseOrConditions(tokens, index + 1, params);
+    const closing = tokens[inner.nextIndex];
+    if (!closing || closing.type !== ")") {
+      throw new Error("Missing closing parenthesis in WHERE clause");
+    }
+    return {
+      clause: inner.clause,
+      nextIndex: inner.nextIndex + 1,
+    };
+  }
+
+  return parseConditionTokens(tokens, index, params);
+}
+
+function parseAndConditions(tokens, index, params) {
+  const clauses = [];
+  let cursor = index;
+
+  while (cursor < tokens.length) {
+    const result = parseConditionGroup(tokens, cursor, params);
+    clauses.push(result.clause);
+    cursor = result.nextIndex;
+
+    const separator = tokens[cursor];
+    if (!separator || separator.type !== "keyword" || separator.value !== "AND") {
+      break;
+    }
+    cursor += 1;
   }
 
   if (clauses.length === 1) {
-    return clauses[0];
+    return { clause: clauses[0], nextIndex: cursor };
+  }
+  return { clause: { $and: clauses }, nextIndex: cursor };
+}
+
+function parseOrConditions(tokens, index, params) {
+  const clauses = [];
+  let cursor = index;
+
+  while (cursor < tokens.length) {
+    const result = parseAndConditions(tokens, cursor, params);
+    clauses.push(result.clause);
+    cursor = result.nextIndex;
+
+    const separator = tokens[cursor];
+    if (!separator || separator.type !== "keyword" || separator.value !== "OR") {
+      break;
+    }
+    cursor += 1;
   }
 
-  return { $and: clauses };
-};
+  if (clauses.length === 1) {
+    return { clause: clauses[0], nextIndex: cursor };
+  }
+
+  return { clause: { $or: clauses }, nextIndex: cursor };
+}
 
 const parseCollectionRef = (input) => {
   const trimmed = input.trim();
@@ -549,6 +634,16 @@ const parseSelectExpression = (expression) => {
       func,
       field,
       alias: alias || `${func.toLowerCase()}_${field === "*" ? "all" : field.replace(/\W+/g, "_")}`,
+    };
+  }
+
+  const aliasWildcardMatch = raw.match(/^([A-Za-z_][A-Za-z0-9_]*)\.\*$/);
+  if (aliasWildcardMatch) {
+    const target = aliasWildcardMatch[1];
+    return {
+      type: "aliasWildcard",
+      target,
+      alias: alias || target,
     };
   }
 
@@ -690,9 +785,13 @@ const parseSqlStatement = (sql, params) => {
     break;
   }
 
-  const selectExpressions = splitOnComma(selectPart).map(parseSelectExpression);
-  const fromSpec = parseFromClause(fromPart);
+  const selectExpressions = splitOnComma(selectPart).map((expression) =>
+    withClause("SELECT", expression, () => parseSelectExpression(expression)),
+  );
+  const fromSpec = withClause("FROM", fromPart, () => parseFromClause(fromPart));
   const hasWildcard = selectExpressions.some((expr) => expr.type === "wildcard");
+  const aliasWildcards = selectExpressions.filter((expr) => expr.type === "aliasWildcard");
+  const hasAliasWildcard = aliasWildcards.length > 0;
   const aggregates = selectExpressions.filter((expr) => expr.type === "aggregate");
   const isAggregate = aggregates.length > 0;
 
@@ -701,6 +800,14 @@ const parseSqlStatement = (sql, params) => {
   }
 
   const fields = selectExpressions.filter((expr) => expr.type === "field");
+
+  if (isAggregate && hasAliasWildcard) {
+    throw wrapSqlError(
+      new Error("Alias wildcards are not supported in aggregate queries"),
+      "SELECT",
+      selectPart,
+    );
+  }
   let projection = null;
   if (!isAggregate && fromSpec.joins.length === 0 && fields.length > 0) {
     projection = {};
@@ -715,8 +822,27 @@ const parseSqlStatement = (sql, params) => {
     throw new Error("SELECT * is not supported with JOIN queries");
   }
 
-  const filter = parseWhere(wherePart, params);
-  const having = parseWhere(havingPart, params);
+  const aliasLookup = new Map();
+  aliasLookup.set(fromSpec.base.alias, fromSpec.base.alias);
+  aliasLookup.set(fromSpec.base.collection, fromSpec.base.alias);
+  for (const join of fromSpec.joins) {
+    aliasLookup.set(join.alias, join.alias);
+    aliasLookup.set(join.collection, join.alias);
+  }
+
+  for (const expr of aliasWildcards) {
+    if (!aliasLookup.has(expr.target)) {
+      throw wrapSqlError(
+        new Error(`Unknown alias "${expr.target}" in SELECT expressions`),
+        "SELECT",
+        selectPart,
+      );
+    }
+    expr.target = aliasLookup.get(expr.target);
+  }
+
+  const filter = wherePart ? withClause("WHERE", wherePart, () => parseWhere(wherePart, params)) : null;
+  const having = havingPart ? withClause("HAVING", havingPart, () => parseWhere(havingPart, params)) : null;
   const groupBy = groupPart ? splitOnComma(groupPart).map((entry) => entry.trim()).filter(Boolean) : [];
   const orderBy = parseOrderBy(orderPart);
   const limit = limitPart ? Number(limitPart) : null;
@@ -731,6 +857,7 @@ const parseSqlStatement = (sql, params) => {
     joins: fromSpec.joins,
     selectExpressions,
     hasWildcard,
+    hasAliasWildcard,
     isAggregate,
     projection,
     filter,
@@ -766,16 +893,32 @@ const resolveFieldFromContext = (context, field, baseAlias) => {
   return getByPath(doc, pathParts.join("."));
 };
 
-const applyFieldSelection = (contexts, selectExpressions, baseAlias) =>
+const applyFieldSelection = (contexts, spec) =>
   contexts.map((context) => {
-    const row = {};
-    for (const expr of selectExpressions) {
-      if (expr.type !== "field") {
+    const baseDoc = context.aliases.get(spec.baseAlias);
+    const row =
+      spec.hasWildcard && baseDoc && typeof baseDoc === "object"
+        ? cloneDeep(baseDoc)
+        : {};
+
+    for (const expr of spec.selectExpressions) {
+      if (expr.type === "wildcard" || expr.type === "aggregate") {
         continue;
       }
-      const value = resolveFieldFromContext(context, expr.field, baseAlias);
-      setByPath(row, expr.alias, value);
+
+      if (expr.type === "aliasWildcard") {
+        const sourceDoc = context.aliases.get(expr.target);
+        const value = sourceDoc === undefined ? null : cloneDeep(sourceDoc);
+        setByPath(row, expr.alias, value);
+        continue;
+      }
+
+      if (expr.type === "field") {
+        const value = resolveFieldFromContext(context, expr.field, spec.baseAlias);
+        setByPath(row, expr.alias, value);
+      }
     }
+
     return row;
   });
 
@@ -942,16 +1085,7 @@ const executeSqlSpec = async (db, spec) => {
   }
 
   if (!spec.isAggregate) {
-    let rows;
-    if (spec.hasWildcard) {
-      rows = contexts.map((context) => cloneDeep(context.aliases.get(spec.baseAlias)));
-    } else {
-      rows = applyFieldSelection(
-        contexts,
-        spec.selectExpressions.filter((expr) => expr.type === 'field'),
-        spec.baseAlias,
-      );
-    }
+    let rows = applyFieldSelection(contexts, spec);
     rows = sortResults(rows, spec.orderBy);
     if (spec.limit !== null) {
       rows = rows.slice(0, spec.limit);
@@ -991,7 +1125,12 @@ const runSql = async (db, input, ...values) => {
     return results;
   }
 
-  const spec = parseSqlStatement(trimmed, params);
+  let spec;
+  try {
+    spec = parseSqlStatement(trimmed, params);
+  } catch (error) {
+    throw wrapSqlError(error, null, trimmed);
+  }
   return executeSqlSpec(db, spec);
 };
 

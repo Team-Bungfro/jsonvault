@@ -371,6 +371,9 @@ npx jsonvault migrate ./data create add-status --dir=./migrations
 npx jsonvault migrate ./data up --dir=./migrations
 npx jsonvault migrate ./data down --step=1 --dir=./migrations
 npx jsonvault migrate ./data status --dir=./migrations
+npx jsonvault migrate ./data status --json --dir=./migrations
+jsonvault changelog tail ./data --limit=25
+jsonvault stats --config=.jsonvault.config.json
 ```
 
 ### Migrations
@@ -414,6 +417,31 @@ const status = await migrationStatus(db, { directory: "./migrations" });
 console.log(status.pending);
 ```
 
+### Configuration & editor helpers
+
+Load shared CLI defaults (path, adapter, change log) with `--config=<file>`:
+
+```json title=".jsonvault.config.json"
+{
+  "database": {
+    "path": "./data",
+    "adapter": "json",
+    "changeLog": {
+      "path": "./data/changelog/log.jsonl",
+      "maxEntries": 10_000,
+      "autoArchive": true
+    }
+  },
+  "migrations": {
+    "directory": "./migrations"
+  }
+}
+```
+
+Every command respects these defaults. For example, `jsonvault migrate --config=.jsonvault.config.json status --json` prints machine-friendly state without repeating flags.
+
+For quick scaffolding, import the VSCode snippets in `docs/snippets/jsonvault.code-snippets`. They cover common SQL helpers and migration templates. TypeScript users also get named exports for the main helpers: `JsonDatabaseOptions`, `ChangeLogOptions`, `Sort`, `migrations`, and `FileStorageAdapter` are all surfaced via `require("jsonvault")` with full typings.
+
 ### Backups
 
 ```js
@@ -445,6 +473,35 @@ console.log(tail);
 ```
 
 Log entries mirror watcher payloads, making it trivial to replay into downstream systems or reconnect watchers.
+
+### Retention & rotation
+
+Keep the journal under control with `maxEntries`, `maxSize`, and `autoArchive`. When thresholds are exceeded jsonvault trims the oldest entries (and, if enabled, writes them to `<log>/archive/log-*.jsonl`).
+
+```js
+const db = await JsonDatabase.open({
+  path: "./data",
+  changeLog: {
+    path: "./data/changelog/log.jsonl",
+    maxEntries: 50_000,
+    maxSize: 5 * 1024 * 1024, // 5 MiB
+    autoArchive: true,
+  },
+});
+```
+
+Use `read({ limit: 100 })` to fetch only the tail. Sequence numbers stay monotonic even after rotation, so CDC consumers can resume safely from the last `seq`.
+
+### CLI tail & CDC recipes
+
+Pipe the change log straight to a shell or script:
+
+```sh
+jsonvault changelog tail ./data --limit=50
+jsonvault changelog tail ./data --from=1200 --limit=100 --log=/tmp/custom.log
+```
+
+Pair it with `--config` for hands-free exports, or run `jsonvault migrate status --json` in CI to verify rollout status. When you deploy CDC workers, watch the archive directory: if a consumer is down for a while, replay archived segments in order before reading the live log.
 
 ---
 

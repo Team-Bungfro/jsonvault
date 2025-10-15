@@ -166,6 +166,7 @@ export interface ChangeLogEntry<T extends Record<string, any> = Record<string, a
 
 export interface ChangeLogReadOptions {
   from?: number;
+  limit?: number;
 }
 
 export interface ChangeLog<T extends Record<string, any> = Record<string, any>> {
@@ -309,6 +310,10 @@ export type AdapterFactory = (options?: Record<string, any>) => StorageAdapter;
 export interface ChangeLogOptions {
   path?: string;
   directory?: string;
+  maxEntries?: number;
+  maxSize?: number;
+  autoArchive?: boolean;
+  archiveDirectory?: string;
 }
 
 export interface JsonDatabaseOptions {

@@ -1,0 +1,49 @@
+{
+  "JsonVault SQL helper": {
+    "prefix": "jvsql",
+    "body": [
+      "const results = await db.sql`",
+      "  SELECT ${1:field}",
+      "  FROM ${2:collection}",
+      "  WHERE ${3:condition}",
+      "  ORDER BY ${4:field}",
+      "`;",
+      "",
+      "console.log(results);"
+    ],
+    "description": "Run a parameterised jsonvault SQL query"
+  },
+  "JsonVault Migration": {
+    "prefix": "jvmigration",
+    "body": [
+      "\"use strict\";",
+      "",
+      "module.exports = {",
+      "  async up(db) {",
+      "    const ${1:collection} = db.collection(\"${1:collection}\");",
+      "    await ${1:collection}.${2:updateMany}(${3:filter}, ${4:update});",
+      "  },",
+      "",
+      "  async down(db) {",
+      "    const ${1:collection} = db.collection(\"${1:collection}\");",
+      "    // TODO: reverse changes",
+      "  },",
+      "};"
+    ],
+    "description": "Starter template for jsonvault migrations"
+  },
+  "JsonVault Change Log Tail": {
+    "prefix": "jvcdc",
+    "body": [
+      "const tail = await db.changeLog.read({",
+      "  from: ${1:lastSeq},",
+      "  limit: ${2:100},",
+      "});",
+      "",
+      "for (const entry of tail) {",
+      "  console.log(entry.seq, entry.collection, entry.type);",
+      "}"
+    ],
+    "description": "Iterate over recent change log entries"
+  }
+}

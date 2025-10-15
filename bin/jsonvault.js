@@ -23,7 +23,11 @@ const usage = () => {
       "  get <path>                  Fetch a document by id",
       "  snapshot <path>             Write a database snapshot",
       "  migrate <path> [action]     Run migrations (actions: up, down, status, create)",
+      "  changelog tail <path>       Print recent change log entries",
       "  query <path> <sql>          Run a SQL/JSONPath query and print results",
+      "",
+      "Global options:",
+      "  --config=<file>              Load CLI defaults (path, adapter, etc.)",
       "",
       "Options for dump:",
       "  --limit=<n>                  Limit number of documents (default: 20)",
@@ -46,6 +50,12 @@ const usage = () => {
       "  --to=<id>                    Stop at migration id",
       "  --step=<n>                   Number of migrations to apply/rollback",
       "  --dryRun                     Show the plan without executing",
+      "  --json                       Print status output as JSON",
+      "",
+      "Options for changelog tail:",
+      "  --limit=<n>                  Maximum entries to print (default 50)",
+      "  --from=<seq>                 Resume from sequence id",
+      "  --log=<path>                Override change log file path",
       "",
     ].join("\n"),
   );
@@ -76,19 +86,124 @@ const parseJson = (value, fallback = {}) => {
   }
 };
 
-const buildDbOptions = (opts = {}) => {
-  const adapterOptions = opts.adapterOptions
-    ? parseJson(opts.adapterOptions, {})
-    : undefined;
+const loadConfig = async (configPath) => {
+  if (!configPath) {
+    return {};
+  }
 
-  return {
-    adapter: opts.adapter,
-    adapterOptions,
+  const resolved = path.resolve(process.cwd(), configPath);
+  let contents;
+  try {
+    contents = await fs.readFile(resolved, "utf8");
+  } catch (error) {
+    if (error.code === "ENOENT") {
+      throw new Error(`Config file not found: ${configPath}`);
+    }
+    throw error;
+  }
+
+  let parsed;
+  try {
+    parsed = JSON.parse(contents);
+  } catch (error) {
+    throw new Error(`Failed to parse config "${configPath}": ${error.message}`);
+  }
+
+  const rootDir = path.dirname(resolved);
+  const normalize = (maybePath) => {
+    if (!maybePath || typeof maybePath !== "string") {
+      return maybePath;
+    }
+    if (path.isAbsolute(maybePath)) {
+      return maybePath;
+    }
+    return path.resolve(rootDir, maybePath);
   };
+
+  const config = {};
+
+  if (parsed.database && typeof parsed.database === "object") {
+    const dbConfig = { ...parsed.database };
+    if (dbConfig.path) {
+      dbConfig.path = normalize(dbConfig.path);
+    }
+    if (dbConfig.adapterOptions && typeof dbConfig.adapterOptions === "object") {
+      dbConfig.adapterOptions = { ...dbConfig.adapterOptions };
+    }
+    if (dbConfig.changeLog && typeof dbConfig.changeLog === "object") {
+      const changeLog = { ...dbConfig.changeLog };
+      if (changeLog.path) {
+        changeLog.path = normalize(changeLog.path);
+      }
+      if (changeLog.directory) {
+        changeLog.directory = normalize(changeLog.directory);
+      }
+      if (changeLog.archiveDirectory) {
+        changeLog.archiveDirectory = normalize(changeLog.archiveDirectory);
+      }
+      dbConfig.changeLog = changeLog;
+    }
+    config.database = dbConfig;
+  }
+
+  if (parsed.migrations && typeof parsed.migrations === "object") {
+    const migrationsConfig = { ...parsed.migrations };
+    if (migrationsConfig.directory) {
+      migrationsConfig.directory = normalize(migrationsConfig.directory);
+    }
+    config.migrations = migrationsConfig;
+  }
+
+  return config;
+};
+
+const resolveDbPathArg = (positional, defaultPath, requiredExtras = 0) => {
+  if (defaultPath && positional && positional.length <= requiredExtras) {
+    return { path: defaultPath, consumed: 0 };
+  }
+
+  if (!positional || positional.length === 0) {
+    return { path: defaultPath || null, consumed: 0 };
+  }
+
+  return { path: positional[0], consumed: 1 };
+};
+
+const buildDbOptions = (opts = {}, config = {}) => {
+  const {
+    path: _ignoredPath,
+    adapter: configAdapter,
+    adapterOptions: configAdapterOptions,
+    changeLog: configChangeLog,
+    ...restConfig
+  } = config || {};
+
+  const adapterOptions =
+    opts.adapterOptions !== undefined
+      ? parseJson(opts.adapterOptions, {})
+      : configAdapterOptions
+        ? { ...configAdapterOptions }
+        : undefined;
+
+  const result = { ...restConfig };
+
+  if (opts.adapter || configAdapter) {
+    result.adapter = opts.adapter || configAdapter;
+  }
+
+  if (adapterOptions !== undefined) {
+    result.adapterOptions = adapterOptions;
+  }
+
+  if (configChangeLog) {
+    result.changeLog = { ...configChangeLog };
+  }
+
+  return result;
 };
 
 const stripDbOptions = (opts = {}) => {
-  const { adapter, adapterOptions, ...rest } = opts;
+  const { adapter, adapterOptions, config, ...rest } = opts;
   return rest;
 };
 
@@ -177,11 +292,13 @@ const documentsToCsv = (documents) => {
 
 const withDatabase = async (dbPath, dbOptions, handler) => {
   const resolved = path.resolve(process.cwd(), dbPath);
+  const { adapter, adapterOptions, ...rest } = dbOptions || {};
   const db = await JsonDatabase.open({
     path: resolved,
     autosave: false,
-    adapter: dbOptions.adapter,
-    adapterOptions: dbOptions.adapterOptions,
+    adapter,
+    adapterOptions,
+    ...rest,
   });
   try {
     return await handler(db, resolved);
@@ -421,14 +538,54 @@ const commands = {
           break;
         }
         case "status": {
+          const jsonOutput = opts.json !== undefined ? toBoolean(opts.json) : false;
           const status = await migrationApi.migrationStatus(db, { directory });
-          printList("Applied migrations:", status.applied);
-          printList("Pending migrations:", status.pending);
+          if (jsonOutput) {
+            stdout.write(`${JSON.stringify(status, null, 2)}\n`);
+          } else {
+            printList("Applied migrations:", status.applied);
+            printList("Pending migrations:", status.pending);
+          }
           break;
         }
         default:
           throw new Error(`Unknown migrate action "${action}"`);
       }
+    });
+  },
+
+  async changelogTail(dbPath, dbOptions, opts = {}) {
+    const resolvedLogPath =
+      typeof opts.log === "string" && opts.log.length > 0
+        ? path.resolve(process.cwd(), opts.log)
+        : null;
+
+    const openOptions = {
+      ...dbOptions,
+      changeLog: resolvedLogPath ? { path: resolvedLogPath } : true,
+    };
+
+    await withDatabase(dbPath, openOptions, async (db) => {
+      if (!db.changeLog) {
+        throw new Error("Change log is not enabled for this database");
+      }
+
+      const limitRaw = opts.limit === undefined ? 50 : Number(opts.limit);
+      if (!Number.isFinite(limitRaw) || limitRaw <= 0) {
+        throw new Error("limit must be a positive number");
+      }
+
+      const readOptions = { limit: limitRaw };
+      if (opts.from !== undefined) {
+        const fromValue = Number(opts.from);
+        if (!Number.isFinite(fromValue) || fromValue < 0) {
+          throw new Error("from must be a non-negative number");
+        }
+        readOptions.from = fromValue;
+      }
+
+      const entries = await db.changeLog.read(readOptions);
+      stdout.write(`${JSON.stringify(entries, null, 2)}\n`);
     });
   },
 };
@@ -444,98 +601,169 @@ const main = async () => {
   const { options, positional } = parseOptions(rest);
 
   try {
+    const config = options.config ? await loadConfig(options.config) : {};
+    if (options.config !== undefined) {
+      delete options.config;
+    }
+
+    const dbConfig = config.database || {};
+    const migrationsConfig = config.migrations || {};
+    const defaultDbPath = dbConfig.path;
+
     switch (command) {
-      case "list":
-        if (positional.length < 1) throw new Error("list requires <path>");
-        await commands.list(positional[0], buildDbOptions(options));
+      case "list": {
+        const { path: dbPath } = resolveDbPathArg(positional, defaultDbPath);
+        if (!dbPath) throw new Error("list requires <path>");
+        await commands.list(dbPath, buildDbOptions(options, dbConfig));
         break;
-      case "stats":
-        if (positional.length < 1) throw new Error("stats requires <path>");
-        await commands.stats(positional[0], buildDbOptions(options));
+      }
+      case "stats": {
+        const { path: dbPath } = resolveDbPathArg(positional, defaultDbPath);
+        if (!dbPath) throw new Error("stats requires <path>");
+        await commands.stats(dbPath, buildDbOptions(options, dbConfig));
         break;
-      case "dump":
-        if (positional.length < 2) {
+      }
+      case "dump": {
+        const { path: dbPath, consumed } = resolveDbPathArg(positional, defaultDbPath, 1);
+        const remaining = positional.slice(consumed);
+        if (!dbPath || remaining.length < 1) {
           throw new Error("dump requires <path> and <collection>");
         }
         await commands.dump(
-          positional[0],
-          buildDbOptions(options),
-          positional[1],
+          dbPath,
+          buildDbOptions(options, dbConfig),
+          remaining[0],
           stripDbOptions(options),
         );
         break;
-      case "export":
-        if (positional.length < 2) {
+      }
+      case "export": {
+        const { path: dbPath, consumed } = resolveDbPathArg(positional, defaultDbPath, 1);
+        const remaining = positional.slice(consumed);
+        if (!dbPath || remaining.length < 1) {
           throw new Error("export requires <path> and <collection>");
         }
         await commands.export(
-          positional[0],
-          buildDbOptions(options),
-          positional[1],
+          dbPath,
+          buildDbOptions(options, dbConfig),
+          remaining[0],
           stripDbOptions(options),
         );
         break;
-      case "put":
-        if (positional.length < 3) {
+      }
+      case "put": {
+        const { path: dbPath, consumed } = resolveDbPathArg(positional, defaultDbPath, 2);
+        const remaining = positional.slice(consumed);
+        if (!dbPath || remaining.length < 2) {
           throw new Error("put requires <path> and <json>");
         }
         await commands.put(
-          positional[0],
-          buildDbOptions(options),
-          positional[1],
-          positional.slice(2).join(" "),
+          dbPath,
+          buildDbOptions(options, dbConfig),
+          remaining[0],
+          remaining.slice(1).join(" "),
         );
         break;
-      case "get":
-        if (positional.length < 2) {
+      }
+      case "get": {
+        const { path: dbPath, consumed } = resolveDbPathArg(positional, defaultDbPath, 1);
+        const remaining = positional.slice(consumed);
+        if (!dbPath || remaining.length < 1) {
           throw new Error("get requires <path>");
         }
         await commands.get(
-          positional[0],
-          buildDbOptions(options),
-          positional[1],
+          dbPath,
+          buildDbOptions(options, dbConfig),
+          remaining[0],
         );
         break;
-      case "query":
-        if (positional.length < 2) {
+      }
+      case "query": {
+        const { path: dbPath, consumed } = resolveDbPathArg(positional, defaultDbPath, 1);
+        const remaining = positional.slice(consumed);
+        if (!dbPath || remaining.length < 1) {
           throw new Error("query requires <path> and <sql>");
         }
         await commands.query(
-          positional[0],
-          buildDbOptions(options),
-          positional.slice(1).join(" "),
+          dbPath,
+          buildDbOptions(options, dbConfig),
+          remaining.join(" "),
         );
         break;
-      case "snapshot":
-        if (positional.length < 1) {
+      }
+      case "snapshot": {
+        const { path: dbPath } = resolveDbPathArg(positional, defaultDbPath);
+        if (!dbPath) {
           throw new Error("snapshot requires <path>");
         }
         await commands.snapshot(
-          positional[0],
-          buildDbOptions(options),
+          dbPath,
+          buildDbOptions(options, dbConfig),
           stripDbOptions(options),
         );
         break;
-      case "migrate":
-        if (positional.length < 1) {
+      }
+      case "migrate": {
+        const migrateActions = new Set(["up", "down", "status", "create"]);
+        let dbPath;
+        let consumed = 0;
+        if (defaultDbPath && (positional.length === 0 || migrateActions.has(positional[0]))) {
+          dbPath = defaultDbPath;
+        } else {
+          const resolved = resolveDbPathArg(positional, defaultDbPath);
+          dbPath = resolved.path;
+          consumed = resolved.consumed;
+        }
+        const remaining = positional.slice(consumed);
+        if (!dbPath) {
           throw new Error("migrate requires <path>");
         }
-        const migrateAction = positional[1] || "up";
+        const migrateAction = remaining[0] || "up";
         const migrateOptions = stripDbOptions(options);
+        if (!migrateOptions.dir && !migrateOptions.directory && migrationsConfig.directory) {
+          migrateOptions.directory = migrationsConfig.directory;
+        }
         if (migrateAction === "create") {
-          const nameParts = positional.slice(2);
+          const nameParts = remaining.slice(1);
           if (nameParts.length === 0) {
             throw new Error("migrate create requires <name>");
           }
           migrateOptions.name = nameParts.join(" ");
         }
         await commands.migrate(
-          positional[0],
-          buildDbOptions(options),
+          dbPath,
+          buildDbOptions(options, dbConfig),
           migrateAction,
           migrateOptions,
         );
         break;
+      }
+      case "changelog": {
+        const changelogActions = new Set(["tail"]);
+        let dbPath;
+        let consumed = 0;
+        if (defaultDbPath && (positional.length === 0 || changelogActions.has(positional[0]))) {
+          dbPath = defaultDbPath;
+        } else {
+          const resolved = resolveDbPathArg(positional, defaultDbPath);
+          dbPath = resolved.path;
+          consumed = resolved.consumed;
+        }
+        const remaining = positional.slice(consumed);
+        if (!dbPath) {
+          throw new Error("changelog requires <path>");
+        }
+        const action = remaining[0] || "tail";
+        if (action !== "tail") {
+          throw new Error(`Unknown changelog action "${action}"`);
+        }
+        await commands.changelogTail(
+          dbPath,
+          buildDbOptions(options, dbConfig),
+          stripDbOptions(options),
+        );
+        break;
+      }
       default:
         throw new Error(`Unknown command "${command}"`);
     }

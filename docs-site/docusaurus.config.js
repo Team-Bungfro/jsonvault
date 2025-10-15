@@ -5,7 +5,7 @@ const config = {
   title: "JSONVault",
   tagline: "JSON document storage that lives in your repo",
   deploymentBranch: "gh-pages",
-  url: "https://team-bungfro.github.io",
+  url: "https://jsonvault.dev",
   baseUrl: "/",
   favicon: "img/favicon.ico",
   organizationName: "team-bungfro",

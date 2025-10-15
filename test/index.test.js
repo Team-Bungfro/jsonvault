@@ -517,6 +517,90 @@ test("db.sql supports JOIN queries", async () => {
   await db.close();
 });
 
+test("db.sql supports alias wildcards in JOIN queries", async () => {
+  const tempDir = await createTempDir();
+  const db = await JsonDatabase.open({ path: tempDir, autosave: false });
+
+  const users = db.collection("users");
+  await users.insertMany([
+    { _id: "alice", email: "alice@example.com" },
+    { _id: "bob", email: "bob@example.com" },
+  ]);
+
+  const orders = db.collection("orders");
+  await orders.insertMany([
+    { id: "o1", userId: "alice", total: 100 },
+    { id: "o2", userId: "bob", total: 200 },
+    { id: "o3", userId: "carol", total: 300 },
+  ]);
+
+  const rows = await db.sql`
+    SELECT orders.id AS orderId, users.*
+    FROM orders
+    JOIN users ON orders.userId = users._id
+    ORDER BY orderId
+  `;
+
+  assert.equal(rows.length, 2);
+  assert.deepEqual(rows[0], {
+    orderId: "o1",
+    users: { _id: "alice", email: "alice@example.com" },
+  });
+  assert.deepEqual(rows[1], {
+    orderId: "o2",
+    users: { _id: "bob", email: "bob@example.com" },
+  });
+
+  await db.close();
+});
+
+test("db.sql WHERE clause supports OR with grouping", async () => {
+  const tempDir = await createTempDir();
+  const db = await JsonDatabase.open({ path: tempDir, autosave: false });
+
+  const orders = db.collection("orders");
+  await orders.insertMany([
+    { id: "o1", userId: "alice", status: "pending", total: 100 },
+    { id: "o2", userId: "bob", status: "paid", total: 200 },
+    { id: "o3", userId: "alice", status: "paid", total: 50 },
+  ]);
+
+  const rows = await db.sql`
+    SELECT id
+    FROM orders
+    WHERE (status = 'paid' AND total >= 150) OR (status = 'pending' AND total >= 100)
+    ORDER BY id
+  `;
+
+  assert.equal(rows.length, 2);
+  assert.deepEqual(rows.map((row) => row.id), ["o1", "o2"]);
+
+  await db.close();
+});
+
+test("db.sql parse errors include clause context", async () => {
+  const tempDir = await createTempDir();
+  const db = await JsonDatabase.open({ path: tempDir, autosave: false });
+
+  const orders = db.collection("orders");
+  await orders.insertOne({ id: "o1", status: "pending" });
+
+  await assert.rejects(
+    () =>
+      db.sql(`
+        SELECT missing.* 
+        FROM orders
+      `),
+    (error) => {
+      assert.match(error.message, /SELECT clause/);
+      assert.match(error.message, /missing\.\*/);
+      return true;
+    },
+  );
+
+  await db.close();
+});
+
 test("db.sql supports JSONPath expressions", async () => {
   const tempDir = await createTempDir();
   const db = await JsonDatabase.open({ path: tempDir, autosave: false });
@@ -566,6 +650,69 @@ test("change log records change events", async () => {
   assert.ok(tail.length >= 1);
   assert.equal(tail[0].seq, lastSeq);
   await reopened.close();
+});
+
+test("change log enforces maxEntries and archives older entries", async () => {
+  const tempDir = await createTempDir();
+  const logPath = path.join(tempDir, "changelog", "log.jsonl");
+  const db = await JsonDatabase.open({
+    path: tempDir,
+    autosave: false,
+    changeLog: {
+      path: logPath,
+      maxEntries: 2,
+      autoArchive: true,
+    },
+  });
+
+  const users = db.collection("users");
+  await users.insertOne({ name: "One" });
+  await users.insertOne({ name: "Two" });
+  await users.insertOne({ name: "Three" });
+
+  await db.close();
+
+  const contents = await fs.readFile(logPath, "utf8");
+  const lines = contents.split("\n").filter(Boolean);
+  assert.equal(lines.length, 2);
+
+  const archiveDir = path.join(path.dirname(logPath), "archive");
+  const archiveEntries = await fs.readdir(archiveDir);
+  assert.ok(archiveEntries.length >= 1);
+
+  const archivePath = path.join(archiveDir, archiveEntries[0]);
+  const archivedContents = await fs.readFile(archivePath, "utf8");
+  const archivedLines = archivedContents.split("\n").filter(Boolean);
+  assert.ok(archivedLines.length >= 1);
+});
+
+test("change log supports size-limited retention and read limits", async () => {
+  const tempDir = await createTempDir();
+  const db = await JsonDatabase.open({
+    path: tempDir,
+    autosave: false,
+    changeLog: {
+      maxSize: 700,
+    },
+  });
+
+  const users = db.collection("users");
+  for (let i = 0; i < 12; i += 1) {
+    await users.insertOne({ name: `User-${i}` });
+  }
+
+  const entries = await db.changeLog.read({ limit: 5 });
+  assert.ok(entries.length <= 5);
+
+  await db.close();
+
+  const logPath = path.join(tempDir, "changelog", "log.jsonl");
+  const contents = await fs.readFile(logPath, "utf8");
+  const lines = contents.split("\n").filter(Boolean);
+  assert.ok(lines.length < 12);
+
+  const stats = await fs.stat(logPath);
+  assert.ok(stats.size <= 700 || lines.length === 1);
 });
 
 test("yaml adapter stores data with .yaml extension", async (t) => {
