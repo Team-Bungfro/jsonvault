@@ -528,7 +528,7 @@ Watchers observe changes that flow through the current `JsonDatabase` instance. 
 
 ## Documentation
 
-- **Live docs:** https://team-bungfro.github.io/jsonvault – Docusaurus site with guides, concepts, and reference material.
+- **Live docs:** https://jsonvault.dev/ – Docusaurus site with guides, concepts, and reference material.
 - **Run locally:** `npm install` followed by `npm run docs:start` (serves on `http://localhost:3000`).
 - **Build static site:** `npm run docs:build` writes to `docs-site/build`; deploy it to GitHub Pages, Netlify, or any static host.
 - **Edit content:** Markdown and MDX files live under `docs-site/docs`. Sidebars and theme config reside in `docs-site/sidebars.js` and `docs-site/docusaurus.config.js`.
