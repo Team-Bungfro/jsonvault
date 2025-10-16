@@ -1,6 +1,10 @@
 "use strict";
 
 const { getByPath } = require("../utils/objectUtils");
+const {
+  InvalidArgumentError,
+  AlreadyExistsError,
+} = require("../errors");
 
 const fingerprint = (value) => {
   if (value === undefined) {
@@ -35,7 +39,7 @@ const resolveTimestamp = (field, value) => {
     }
   }
 
-  throw new Error(
+  throw new InvalidArgumentError(
     `Cannot index field "${field}" as TTL because the value "${value}" is not a date, number, or ISO string.`,
   );
 };
@@ -82,7 +86,7 @@ class IndexManager {
         : Number(options.expireAfterSeconds);
 
     if (!Number.isFinite(ttlValue) || ttlValue <= 0) {
-      throw new Error(
+      throw new InvalidArgumentError(
         `ttlSeconds/expireAfterSeconds for collection "${this.collectionName}" must be a positive number`,
       );
     }
@@ -134,7 +138,7 @@ class IndexManager {
 
       const set = index.values.get(key);
       if (index.options.unique && set.size > 0) {
-        throw new Error(
+        throw new AlreadyExistsError(
           `Duplicate value for unique index "${index.field}" in collection "${this.collectionName}"`,
         );
       }

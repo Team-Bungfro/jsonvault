@@ -21,6 +21,7 @@ const sidebars = {
         "concepts/queries",
         "concepts/migrations",
         "concepts/change-log",
+        "concepts/policies",
       ],
     },
     {
@@ -38,6 +39,7 @@ const sidebars = {
       label: "Reference",
       items: [
         "reference/configuration",
+        "reference/errors",
       ],
     },
   ],

@@ -1,6 +1,7 @@
 "use strict";
 
 const { getByPath } = require("../utils/objectUtils");
+const { QueryError } = require("../errors");
 
 const isOperatorObject = (value) => {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
@@ -209,7 +210,7 @@ const applyOperators = (value, query) => {
 
     const handler = basicOperator[operator];
     if (!handler) {
-      throw new Error(`Unsupported operator "${operator}"`);
+      throw new QueryError(`Unsupported operator "${operator}"`);
     }
 
     if (operator === "$regex") {

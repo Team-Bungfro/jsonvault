@@ -18,6 +18,7 @@ const {
   migrateDown,
   migrationStatus,
   migrations,
+  PolicyDeniedError,
 } = require("../src");
 
 const createTempDir = async () => {
@@ -601,6 +602,105 @@ test("db.sql parse errors include clause context", async () => {
   await db.close();
 });
 
+test("db.sql supports multiple joins, left joins, and pagination", async () => {
+  const tempDir = await createTempDir();
+  const db = await JsonDatabase.open({ path: tempDir, autosave: false });
+
+  const users = db.collection("users");
+  await users.insertMany([
+    { _id: "alice", email: "alice@example.com" },
+    { _id: "bob", email: "bob@example.com" },
+    { _id: "carol", email: "carol@example.com" },
+  ]);
+
+  const accounts = db.collection("accounts");
+  await accounts.insertMany([
+    { id: "a1", userId: "alice", tier: "gold" },
+    { id: "a2", userId: "bob", tier: "silver" },
+  ]);
+
+  const orders = db.collection("orders");
+  await orders.insertMany([
+    { id: "o1", userId: "alice", total: 1500 },
+    { id: "o2", userId: "bob", total: 200 },
+    { id: "o3", userId: "carol", total: 50 },
+  ]);
+
+  const payments = db.collection("payments");
+  await payments.insertMany([
+    { id: "p1", userId: "alice", amount: 1500 },
+    { id: "p2", userId: "bob", amount: 200 },
+  ]);
+
+  const joinRows = await db.sql`
+    SELECT orders.id AS orderId, users.email AS email, accounts.tier AS tier
+    FROM orders
+    JOIN users ON orders.userId = users._id
+    JOIN accounts ON accounts.userId = users._id
+    ORDER BY orderId
+  `;
+
+  assert.equal(joinRows.length, 2);
+  assert.deepEqual(joinRows[0], {
+    orderId: "o1",
+    email: "alice@example.com",
+    tier: "gold",
+  });
+  assert.deepEqual(joinRows[1], {
+    orderId: "o2",
+    email: "bob@example.com",
+    tier: "silver",
+  });
+
+  const leftJoinRows = await db.sql`
+    SELECT users._id AS userId, payments.amount AS lastPayment
+    FROM users
+    LEFT JOIN payments ON payments.userId = users._id
+    ORDER BY userId
+  `;
+
+  assert.equal(leftJoinRows.length, 3);
+  assert.deepEqual(leftJoinRows[0], { userId: "alice", lastPayment: 1500 });
+  assert.deepEqual(leftJoinRows[1], { userId: "bob", lastPayment: 200 });
+  assert.deepEqual(leftJoinRows[2], { userId: "carol", lastPayment: undefined });
+
+  const subselectRows = await db.sql`
+    SELECT summary.userId AS userId, summary.total AS total
+    FROM (
+      SELECT userId, SUM(total) AS total
+      FROM orders
+      GROUP BY userId
+    ) AS summary
+    WHERE summary.total > 300
+    ORDER BY summary.userId
+  `;
+
+  assert.deepEqual(subselectRows, [
+    { userId: "alice", total: 1500 },
+  ]);
+
+  const pagedRows = await db.sql`
+    SELECT orders.id AS orderId, orders.total AS total
+    FROM orders
+    ORDER BY total DESC
+    LIMIT 1 OFFSET 1
+  `;
+  assert.equal(pagedRows.length, 1);
+  assert.deepEqual(pagedRows[0], { orderId: "o2", total: 200 });
+
+  const countedRows = await db.sql`
+    SELECT orders.id AS orderId, COUNT(*) OVER() AS totalCount
+    FROM orders
+    ORDER BY orderId
+    LIMIT 2 OFFSET 1
+  `;
+  assert.equal(countedRows.length, 2);
+  assert.equal(countedRows[0].totalCount, 3);
+  assert.equal(countedRows[1].totalCount, 3);
+
+  await db.close();
+});
+
 test("db.sql supports JSONPath expressions", async () => {
   const tempDir = await createTempDir();
   const db = await JsonDatabase.open({ path: tempDir, autosave: false });
@@ -713,6 +813,94 @@ test("change log supports size-limited retention and read limits", async () => {
 
   const stats = await fs.stat(logPath);
   assert.ok(stats.size <= 700 || lines.length === 1);
+});
+
+test("collection policies enforce read, write, and redaction rules", async () => {
+  const tempDir = await createTempDir();
+  const db = await JsonDatabase.open({ path: tempDir, autosave: false });
+
+  db.policy("users", {
+    read({ row, ctx }) {
+      if (!ctx) {
+        return false;
+      }
+      return ctx.role === "admin" || row.ownerId === ctx.userId;
+    },
+    write({ previous, next, ctx, operation }) {
+      if (!ctx) {
+        return false;
+      }
+      if (ctx.role === "admin") {
+        return true;
+      }
+      if (operation === "insert") {
+        return next && next.ownerId === ctx.userId;
+      }
+      if (operation === "update") {
+        return (
+          previous &&
+          previous.ownerId === ctx.userId &&
+          next &&
+          next.ownerId === ctx.userId
+        );
+      }
+      if (operation === "delete") {
+        return previous && previous.ownerId === ctx.userId;
+      }
+      return false;
+    },
+    redact({ row, ctx }) {
+      if (ctx && ctx.role === "admin") {
+        return row;
+      }
+      return {
+        ...row,
+        email: null,
+      };
+    },
+  });
+
+  const admin = db.with({ userId: "admin", role: "admin" });
+  const [userOne, userTwo] = await admin
+    .collection("users")
+    .insertMany([
+      { ownerId: "u1", email: "u1@example.com", plan: "free" },
+      { ownerId: "u2", email: "u2@example.com", plan: "pro" },
+    ]);
+
+  const userScoped = db.with({ userId: "u1", role: "user" });
+  const visible = await userScoped.collection("users").find();
+  assert.equal(visible.length, 1);
+  assert.equal(visible[0].ownerId, "u1");
+  assert.equal(visible[0].email, null);
+
+  await assert.rejects(
+    () =>
+      userScoped.collection("users").insertOne({ ownerId: "u2", email: "nope" }),
+    PolicyDeniedError,
+  );
+
+  await assert.rejects(
+    () =>
+      userScoped
+        .collection("users")
+        .updateOne({ ownerId: "u1" }, { $set: { ownerId: "u2" } }),
+    PolicyDeniedError,
+  );
+
+  const approvedUpdate = await userScoped
+    .collection("users")
+    .updateOne({ ownerId: "u1" }, { $set: { plan: "pro" } });
+  assert.equal(approvedUpdate.matchedCount, 1);
+
+  const redactedDoc = await userScoped.get(`users/${userOne._id}`);
+  assert.equal(redactedDoc.email, null);
+
+  const adminView = await admin.collection("users").find();
+  assert.equal(adminView.length, 2);
+  assert.equal(adminView[0].email.includes("@"), true);
+
+  await db.close();
 });
 
 test("yaml adapter stores data with .yaml extension", async (t) => {

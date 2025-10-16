@@ -2,6 +2,12 @@
 
 const fs = require("fs/promises");
 const path = require("path");
+const {
+  AlreadyExistsError,
+  InvalidArgumentError,
+  NotFoundError,
+  InvalidOperationError,
+} = require("../errors");
 
 const SUPPORTED_EXTENSIONS = new Set([".js", ".cjs"]);
 
@@ -68,7 +74,7 @@ const createMigration = async (options = {}) => {
 
   try {
     await fs.access(filePath);
-    throw new Error(`Migration "${filename}" already exists in ${targetDir}`);
+    throw new AlreadyExistsError(`Migration "${filename}" already exists in ${targetDir}`);
   } catch (error) {
     if (error.code !== "ENOENT") {
       throw error;
@@ -112,11 +118,13 @@ const toMigrationRecord = (entry, filePath) => {
   }
 
   if (typeof up !== "function") {
-    throw new Error(`Migration "${path.basename(filePath)}" must export an up() function`);
+    throw new InvalidArgumentError(
+      `Migration "${path.basename(filePath)}" must export an up() function`,
+    );
   }
 
   if (down && typeof down !== "function") {
-    throw new Error(
+    throw new InvalidArgumentError(
       `Migration "${path.basename(filePath)}" exports down but it is not a function`,
     );
   }
@@ -169,14 +177,14 @@ const planMigrateUp = (pending, options = {}) => {
   if (options.to) {
     const index = plan.findIndex((migration) => migration.id === options.to);
     if (index === -1) {
-      throw new Error(`Migration "${options.to}" not found or already applied`);
+      throw new NotFoundError(`Migration "${options.to}" not found or already applied`);
     }
     return plan.slice(0, index + 1);
   }
   if (options.step !== undefined) {
     const step = Number(options.step);
     if (!Number.isInteger(step) || step <= 0) {
-      throw new Error("step must be a positive integer");
+      throw new InvalidArgumentError("step must be a positive integer");
     }
     return plan.slice(0, step);
   }
@@ -191,12 +199,11 @@ const planMigrateDown = (applied, migrations, options = {}) => {
   const map = new Map(migrations.map((migration) => [migration.id, migration]));
   const plan = [];
   let targetSeen = !options.to;
-  const step =
-    options.step === undefined ? undefined : Number(options.step);
+  const step = options.step === undefined ? undefined : Number(options.step);
 
   if (step !== undefined) {
     if (!Number.isInteger(step) || step <= 0) {
-      throw new Error("step must be a positive integer");
+      throw new InvalidArgumentError("step must be a positive integer");
     }
   }
 
@@ -209,10 +216,10 @@ const planMigrateDown = (applied, migrations, options = {}) => {
 
     const migration = map.get(entry.id);
     if (!migration) {
-      throw new Error(`Migration definition for "${entry.id}" is missing`);
+      throw new NotFoundError(`Migration definition for "${entry.id}" is missing`);
     }
     if (typeof migration.down !== "function") {
-      throw new Error(`Migration "${entry.id}" does not define a down() function`);
+      throw new InvalidOperationError(`Migration "${entry.id}" does not define a down() function`);
     }
     plan.push(migration);
 
@@ -265,7 +272,7 @@ const migrateDown = async (db, options = {}) => {
   const { plan, targetSeen } = planMigrateDown(applied, migrations, options);
 
   if (options.to && !targetSeen) {
-    throw new Error(`Applied migrations do not include "${options.to}"`);
+    throw new InvalidArgumentError(`Applied migrations do not include "${options.to}"`);
   }
 
   if (plan.length === 0) {

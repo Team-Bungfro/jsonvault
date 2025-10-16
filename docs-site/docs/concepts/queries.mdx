@@ -87,9 +87,10 @@ const expensive = await db.sql("$.orders[?(@.total > 1000)]");
 
 - `SELECT` columns with aliases.
 - Aggregates: `SUM`, `AVG`, `MIN`, `MAX`, `COUNT`.
-- `WHERE`, `BETWEEN`, `IN`, `IS NULL`, basic boolean logic (`AND`).
-- Single inner `JOIN` on equality (`JOIN users ON orders.userId = users._id`).
+- `WHERE`, `BETWEEN`, `IN`, `IS NULL`, boolean logic (`AND`/`OR`).
+- Multiple `JOIN`s (including `LEFT JOIN`) on equality (`JOIN users ON orders.userId = users._id`).
 - `GROUP BY`, `HAVING`, `ORDER BY`, `LIMIT`.
+- Sub-selects in `FROM` clauses, `LIMIT ... OFFSET ...` pagination, and `ORDER BY` alias support.
+- `COUNT(*) OVER()` to attach total row counts for paginated responses.
 - Template parameters (`${value}`) keep user input safe.
-
-Upcoming extensions often involve support for multiple joins, OR conditions in SQL, and automatic pagination.
+- Policies defined with `db.policy()` automatically inject additional filters and redact result rows, even for SQL queries.

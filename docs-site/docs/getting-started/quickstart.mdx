@@ -83,7 +83,45 @@ await db.save();
 await db.close();
 ```
 
-## 4. Explore other entry points
+## 4. Add access policies
+
+```js title="policies.js"
+const { PolicyDeniedError } = require("jsonvault");
+
+db.policy("orders", {
+  read({ row, ctx }) {
+    if (!ctx) return false;
+    return ctx.role === "admin" || row.userId === ctx.userId;
+  },
+  write({ previous, next, ctx, operation }) {
+    if (!ctx) return false;
+    if (ctx.role === "admin") return true;
+    if (operation === "insert") return next?.userId === ctx.userId;
+    if (operation === "update") {
+      return previous?.userId === ctx.userId && next?.userId === ctx.userId;
+    }
+    if (operation === "delete") return previous?.userId === ctx.userId;
+    return false;
+  },
+  redact({ row, ctx }) {
+    return ctx?.role === "admin" ? row : { ...row, internalNotes: undefined };
+  },
+});
+
+const aliceDb = db.with({ userId: "alice", role: "user" });
+
+try {
+  await aliceDb.collection("orders").insertOne({ userId: "bob", total: 10 });
+} catch (error) {
+  if (error instanceof PolicyDeniedError) {
+    console.warn("Denied by policy");
+  }
+}
+```
+
+`db.with(context)` scopes the current async context so every collection call, SQL query, or compiled stream inside that scope inherits the same access rules.
+
+## 5. Explore other entry points
 
 <Tabs>
   <TabItem value="sql" label="SQL Helper">
