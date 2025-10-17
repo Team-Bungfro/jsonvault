@@ -13,6 +13,15 @@ const {
   createYamlAdapter,
 } = require("./adapters");
 const migrations = require("./migrations");
+const {
+  JsonVaultError,
+  InvalidArgumentError,
+  InvalidOperationError,
+  NotFoundError,
+  AlreadyExistsError,
+  QueryError,
+  PolicyDeniedError,
+} = require("./errors");
 
 module.exports = {
   JsonDatabase,
@@ -36,4 +45,11 @@ module.exports = {
   migrationStatus: migrations.migrationStatus,
   loadMigrations: migrations.loadMigrations,
   createMigration: migrations.createMigration,
+  JsonVaultError,
+  InvalidArgumentError,
+  InvalidOperationError,
+  NotFoundError,
+  AlreadyExistsError,
+  QueryError,
+  PolicyDeniedError,
 };

@@ -1,6 +1,7 @@
 "use strict";
 
 const { getByPath } = require("../utils/objectUtils");
+const { QueryError, InvalidArgumentError } = require("../errors");
 
 const comparison = (lhs, op, rhs) => {
   switch (op) {
@@ -17,7 +18,7 @@ const comparison = (lhs, op, rhs) => {
     case "!=":
       return lhs !== rhs;
     default:
-      throw new Error(`Unsupported operator ${op}`);
+      throw new QueryError(`Unsupported operator ${op}`);
   }
 };
 
@@ -121,7 +122,7 @@ const parseCondition = (input) => {
   const comparisonRegex = /^@\.([\w.]+)\s*(==|!=|>=|<=|>|<)\s*(.+)$/;
   const match = comparisonRegex.exec(condition);
   if (!match) {
-    throw new Error(`Unsupported condition: ${condition}`);
+    throw new QueryError(`Unsupported condition: ${condition}`);
   }
 
   const [, field, operator, rawValue] = match;
@@ -155,13 +156,13 @@ const buildPredicate = (node) => {
     return (doc) => predicates.some((fn) => fn(doc));
   }
 
-  throw new Error("Unknown condition node");
+  throw new QueryError("Unknown condition node");
 };
 
 const compileExpression = (expression) => {
   const match = expressionRegex.exec(expression.trim());
   if (!match) {
-    throw new Error(
+    throw new QueryError(
       "Unsupported expression. Expected format like '$.collection[?(@.field > 10)]'",
     );
   }
@@ -188,7 +189,7 @@ const compileExpression = (expression) => {
 
 const compileFilter = (spec) => {
   if (!spec.collection) {
-    throw new Error("compile({ collection }) requires a collection name");
+    throw new InvalidArgumentError("compile({ collection }) requires a collection name");
   }
 
   const collection = spec.collection;
@@ -222,7 +223,7 @@ const compileQuery = (input) => {
     return compileFilter(input);
   }
 
-  throw new Error("Unsupported compile() input");
+  throw new InvalidArgumentError("Unsupported compile() input");
 };
 
 module.exports = {

@@ -2,6 +2,7 @@
 
 const fs = require("fs/promises");
 const path = require("path");
+const { InvalidArgumentError } = require("../errors");
 
 const ensureDir = async (directory) => {
   await fs.mkdir(directory, { recursive: true });
@@ -24,7 +25,7 @@ const bufferLength = (value) => Buffer.byteLength(value, "utf8");
 class FileChangeLog {
   constructor(options = {}) {
     if (!options.file) {
-      throw new Error("FileChangeLog requires a file path");
+      throw new InvalidArgumentError("FileChangeLog requires a file path");
     }
     this.file = path.resolve(options.file);
     this._options = {

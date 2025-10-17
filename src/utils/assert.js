@@ -1,8 +1,10 @@
 "use strict";
 
-const invariant = (condition, message) => {
+const { JsonVaultError } = require("../errors");
+
+const invariant = (condition, message, details) => {
   if (!condition) {
-    throw new Error(message);
+    throw new JsonVaultError(message, details);
   }
 };
 

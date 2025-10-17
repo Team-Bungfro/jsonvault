@@ -2,6 +2,8 @@
 
 const path = require("path");
 const EventEmitter = require("events");
+const { AsyncLocalStorage } = require("node:async_hooks");
+
 const JsonCollection = require("./collection");
 const FileStorageAdapter = require("./storage/fileStorageAdapter");
 const { getAdapter } = require("./adapters");
@@ -10,6 +12,10 @@ const debounce = require("./utils/debounce");
 const { cloneDeep } = require("./utils/objectUtils");
 const { runSql } = require("./sql/sqlEngine");
 const FileChangeLog = require("./changelog/fileChangeLog");
+const {
+  PolicyDeniedError,
+  InvalidArgumentError,
+} = require("./errors");
 
 const debugWatch = (...parts) => {
   if (process.env.JSONVAULT_DEBUG_WATCH) {
@@ -39,7 +45,7 @@ class JsonDatabase {
       const adapterFactory = getAdapter(adapterName);
 
       if (!adapterFactory) {
-        throw new Error(
+        throw new InvalidArgumentError(
           `Unknown adapter "${adapterName}". Register it with registerAdapter().`,
         );
       }
@@ -63,6 +69,8 @@ class JsonDatabase {
     this._watchers = new Set();
     this._fsWatcherCleanup = null;
     this._changeLog = null;
+    this._contextStore = new AsyncLocalStorage();
+    this._policies = new Map();
   }
 
   static async open(options = {}) {
@@ -143,6 +151,174 @@ class JsonDatabase {
 
   get changeLog() {
     return this._changeLog;
+  }
+
+  getContext() {
+    return this._contextStore.getStore() || null;
+  }
+
+  with(context = {}) {
+    const baseContext = { ...(this.getContext() || {}), ...context };
+    const database = this;
+
+    const handler = {
+      get(target, prop) {
+        if (typeof prop === "symbol") {
+          return Reflect.get(target, prop);
+        }
+        if (prop === "with") {
+          return (child = {}) =>
+            database.with({ ...baseContext, ...child });
+        }
+        const value = target[prop];
+        if (typeof value === "function") {
+          return (...args) =>
+            database._contextStore.run(baseContext, () => {
+              const result = value.apply(target, args);
+              return database._wrapResultWithContext(result, baseContext);
+            });
+        }
+        return database._wrapResultWithContext(value, baseContext);
+      },
+    };
+
+    return new Proxy(this, handler);
+  }
+
+  policy(collectionName, definition = {}) {
+    if (!collectionName || typeof collectionName !== "string") {
+      throw new InvalidArgumentError(
+        "policy(collection, definition) requires a collection name",
+      );
+    }
+    if (!definition || typeof definition !== "object") {
+      throw new InvalidArgumentError(
+        "policy(collection, definition) requires a definition object",
+      );
+    }
+
+    const normalized = this._normalizePolicy(definition);
+    this._policies.set(collectionName, normalized);
+  }
+
+  async get(documentPath) {
+    if (!documentPath || typeof documentPath !== "string") {
+      throw new InvalidArgumentError(
+        "get(path) requires a document path (collection/id)",
+      );
+    }
+    const parts = documentPath.split("/").filter(Boolean);
+    if (parts.length < 2) {
+      throw new InvalidArgumentError(
+        "Document path must be in the form collection/id",
+      );
+    }
+    const [collection, ...rest] = parts;
+    const id = rest.join("/");
+    if (!id) {
+      throw new InvalidArgumentError("Document path must include an id");
+    }
+    const coll = this.collection(collection);
+    return coll.findById(id);
+  }
+
+  _getPolicy(collectionName) {
+    return this._policies.get(collectionName) || null;
+  }
+
+  _normalizePolicy(definition) {
+    const asyncWrap = (fn, fallback) => {
+      if (typeof fn !== "function") {
+        return fallback;
+      }
+      return async (payload) => fn(payload);
+    };
+
+    const read = asyncWrap(
+      definition.read,
+      async () => true,
+    );
+    const write = asyncWrap(
+      definition.write,
+      async () => true,
+    );
+    const redact = asyncWrap(
+      definition.redact,
+      async ({ row }) => cloneDeep(row),
+    );
+
+    return { read, write, redact };
+  }
+
+  async _allowRead(collectionName, row) {
+    const policy = this._getPolicy(collectionName);
+    if (!policy) {
+      return true;
+    }
+    const ctx = this.getContext();
+    const payload = { row: cloneDeep(row), ctx: ctx ? { ...ctx } : null };
+    return Boolean(await policy.read(payload));
+  }
+
+  async _redactRow(collectionName, row) {
+    const policy = this._getPolicy(collectionName);
+    if (!policy) {
+      return cloneDeep(row);
+    }
+    const ctx = this.getContext();
+    const payload = { row: cloneDeep(row), ctx: ctx ? { ...ctx } : null };
+    const result = await policy.redact(payload);
+    if (result === undefined || result === null) {
+      return null;
+    }
+    return cloneDeep(result);
+  }
+
+  async _enforceWritePolicy(collectionName, operation, previous, next) {
+    const policy = this._getPolicy(collectionName);
+    if (!policy) {
+      return;
+    }
+    const ctx = this.getContext();
+    const payload = {
+      operation,
+      previous: previous == null ? null : cloneDeep(previous),
+      next: next == null ? null : cloneDeep(next),
+      ctx: ctx ? { ...ctx } : null,
+    };
+    const allowed = await policy.write(payload);
+    if (!allowed) {
+      throw new PolicyDeniedError(
+        `Policy denied ${operation} on collection "${collectionName}"`,
+        { collection: collectionName, operation, ctx: payload.ctx },
+      );
+    }
+  }
+
+  _wrapResultWithContext(value, context) {
+    if (value instanceof JsonCollection) {
+      return this._wrapCollectionWithContext(value, context);
+    }
+    return value;
+  }
+
+  _wrapCollectionWithContext(collection, context) {
+    const database = this;
+    return new Proxy(collection, {
+      get(target, prop) {
+        if (typeof prop === "symbol") {
+          return Reflect.get(target, prop);
+        }
+        const value = target[prop];
+        if (typeof value === "function") {
+          return (...args) =>
+            database._contextStore.run(context, () =>
+              value.apply(target, args),
+            );
+        }
+        return value;
+      },
+    });
   }
 
   getAppliedMigrations() {
@@ -548,7 +724,9 @@ class JsonDatabase {
 
   async restore(snapshot) {
     if (!snapshot || typeof snapshot !== "object") {
-      throw new Error("snapshot() expects an object created by JsonDatabase.snapshot()");
+      throw new InvalidArgumentError(
+        "snapshot() expects an object created by JsonDatabase.snapshot()",
+      );
     }
 
     const collections = snapshot.collections || {};
@@ -573,7 +751,9 @@ class JsonDatabase {
 
   stream(compiled, options = {}) {
     if (!compiled || typeof compiled.execute !== "function") {
-      throw new Error("db.stream requires a compiled query from db.compile()");
+      throw new InvalidArgumentError(
+        "db.stream requires a compiled query from db.compile()",
+      );
     }
     return compiled.execute(this, options);
   }

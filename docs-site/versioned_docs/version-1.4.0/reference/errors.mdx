@@ -1,0 +1,57 @@
+---
+sidebar_position: 2
+title: Error Handling
+---
+
+JSONVault raises typed errors so you can distinguish between invalid input, policy denials, and query failures without string matching. Each error inherits from `JsonVaultError`, exposes a stable `code`, and carries a `details` object for extra context.
+
+## Error classes
+
+| Error | Code | When it is thrown |
+| ----- | ---- | ----------------- |
+| `InvalidArgumentError` | `ERR_INVALID_ARGUMENT` | Missing or malformed input such as CLI flags, document paths, or schema rules |
+| `InvalidOperationError` | `ERR_INVALID_OPERATION` | Operation is not allowed in the current state (changing a primary key, changelog disabled, decryption failure, etc.) |
+| `AlreadyExistsError` | `ERR_ALREADY_EXISTS` | Entity already exists (duplicate documents, migration files, indexes) |
+| `NotFoundError` | `ERR_NOT_FOUND` | Requested resource (migration, adapter, config file) could not be located |
+| `QueryError` | `ERR_QUERY` | SQL / compiled query parsing or execution error |
+| `PolicyDeniedError` | `ERR_POLICY_DENIED` | Collection policy rejected a read or write |
+| `JsonVaultError` | `ERR_JSONVAULT` | Base class for internal failures (should be rare) |
+
+Each subclass also exposes a static `code` property if you prefer comparing against strings.
+
+## Handling errors
+
+```js title="Express handler"
+const {
+  JsonDatabase,
+  InvalidArgumentError,
+  AlreadyExistsError,
+  QueryError,
+} = require("jsonvault");
+
+const db = await JsonDatabase.open({ path: "./data" });
+
+app.post("/orders", async (req, res, next) => {
+  try {
+    const doc = await db.collection("orders").insertOne(req.body);
+    res.status(201).json(doc);
+  } catch (error) {
+    if (error instanceof InvalidArgumentError) {
+      return res.status(400).json({ code: error.code, message: error.message });
+    }
+    if (error instanceof AlreadyExistsError) {
+      return res.status(409).json({ code: error.code, message: error.message });
+    }
+    if (error instanceof QueryError) {
+      return res.status(422).json({ code: error.code, message: error.message, details: error.details });
+    }
+    return next(error);
+  }
+});
+```
+
+The `.details` object is free-form and varies by source (e.g. schema path, SQL clause, policy context). Pass it through to logs or telemetry for easier debugging.
+
+## CLI behaviour
+
+The `jsonvault` CLI surfaces the same errors. For example, `jsonvault dump --limit=-1` exits with an `ERR_INVALID_ARGUMENT` message. When scripting, check the process exit code or parse `stderr` for the error code to branch accordingly.

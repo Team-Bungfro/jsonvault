@@ -2,6 +2,10 @@
 
 const { cloneDeep, getByPath, setByPath } = require("../utils/objectUtils");
 const { compareValues, matchFilter } = require("../query/operators");
+const {
+  QueryError,
+  InvalidArgumentError,
+} = require("../errors");
 
 const PARAM_MARKER = "__jsonvault_param_";
 
@@ -35,8 +39,11 @@ const wrapSqlError = (error, clause, text) => {
   const snippet = formatSnippet(text);
   const clauseLabel = clause ? `${clause} clause` : "SQL";
   const suffix = snippet ? ` near "${snippet}"` : "";
-  const wrapped = new Error(`${error.message} (${clauseLabel}${suffix})`);
-  wrapped.cause = error;
+  const wrapped = new QueryError(`${error.message} (${clauseLabel}${suffix})`, {
+    clause: clauseLabel,
+    snippet,
+    cause: error,
+  });
   wrapped[wrapMarker] = true;
   return wrapped;
 };
@@ -134,6 +141,166 @@ const AGGREGATE_FACTORIES = {
   },
 };
 
+const JOIN_PATTERNS = [
+  { regex: /^LEFT\s+OUTER\s+JOIN\s+/i, type: "left" },
+  { regex: /^LEFT\s+JOIN\s+/i, type: "left" },
+  { regex: /^INNER\s+JOIN\s+/i, type: "inner" },
+  { regex: /^JOIN\s+/i, type: "inner" },
+];
+
+const CLAUSE_KEYWORDS = ["WHERE", "GROUP BY", "HAVING", "ORDER BY", "LIMIT"];
+
+const isWhitespace = (char) => {
+  if (!char) {
+    return true;
+  }
+  return /\s/.test(char);
+};
+
+const findMatchingParen = (input, startIndex = 0) => {
+  let depth = 0;
+  let quote = null;
+  for (let i = startIndex; i < input.length; i += 1) {
+    const char = input[i];
+    if (quote) {
+      if (char === quote && input[i - 1] !== "\\") {
+        quote = null;
+      }
+      continue;
+    }
+    if (char === "'" || char === "\"") {
+      quote = char;
+      continue;
+    }
+    if (char === "(") {
+      depth += 1;
+    } else if (char === ")") {
+      depth -= 1;
+      if (depth === 0) {
+        return i;
+      }
+    }
+  }
+  return -1;
+};
+
+const findNextJoin = (input, startIndex = 0) => {
+  const upper = input.toUpperCase();
+  let depth = 0;
+  let quote = null;
+
+  for (let i = startIndex; i < upper.length; i += 1) {
+    const char = input[i];
+    if (quote) {
+      if (char === quote && input[i - 1] !== "\\") {
+        quote = null;
+      }
+      continue;
+    }
+    if (char === "'" || char === "\"") {
+      quote = char;
+      continue;
+    }
+    if (char === "(") {
+      depth += 1;
+      continue;
+    }
+    if (char === ")") {
+      depth = Math.max(0, depth - 1);
+      continue;
+    }
+
+    if (depth === 0) {
+      for (const pattern of JOIN_PATTERNS) {
+        if (upper.slice(i).match(pattern.regex)) {
+          return { index: i, pattern };
+        }
+      }
+    }
+  }
+
+  return null;
+};
+
+const splitFromSegments = (input) => {
+  const segments = [];
+  let start = 0;
+  while (start < input.length) {
+    const match = findNextJoin(input, start);
+    if (!match) {
+      const tail = input.slice(start).trim();
+      if (tail) {
+        segments.push(tail);
+      }
+      break;
+    }
+
+    const before = input.slice(start, match.index).trim();
+    if (before) {
+      segments.push(before);
+    }
+
+    // find the next join to slice this segment
+    const next = findNextJoin(input, match.index + input.slice(match.index).match(match.pattern.regex)[0].length);
+    if (!next) {
+      const tail = input.slice(match.index).trim();
+      if (tail) {
+        segments.push(tail);
+      }
+      break;
+    }
+
+    const between = input.slice(match.index, next.index).trim();
+    if (between) {
+      segments.push(between);
+    }
+    start = next.index;
+  }
+
+  if (segments.length === 0 && input.trim()) {
+    segments.push(input.trim());
+  }
+
+  return segments;
+};
+
+const splitOnKeywordOutsideParens = (input, keyword) => {
+  const upper = input.toUpperCase();
+  const target = keyword.toUpperCase();
+  let depth = 0;
+  let quote = null;
+
+  for (let i = 0; i < input.length; i += 1) {
+    const char = input[i];
+    if (quote) {
+      if (char === quote && input[i - 1] !== "\\") {
+        quote = null;
+      }
+      continue;
+    }
+    if (char === "'" || char === "\"") {
+      quote = char;
+      continue;
+    }
+    if (char === "(") {
+      depth += 1;
+      continue;
+    }
+    if (char === ")") {
+      depth = Math.max(0, depth - 1);
+      continue;
+    }
+    if (depth === 0 && upper.slice(i, i + target.length) === target) {
+      return {
+        left: input.slice(0, i).trim(),
+        right: input.slice(i + target.length).trim(),
+      };
+    }
+  }
+
+  return null;
+};
+
 const splitOnComma = (input) => {
   const parts = [];
   let current = "";
@@ -208,6 +375,105 @@ const classifyBuffer = (buffer) => {
   }
 
   return { type: "identifier", value: buffer };
+};
+
+const findNextClauseIndex = (input, startIndex, keywords) => {
+  const upper = input.toUpperCase();
+  let depth = 0;
+  let quote = null;
+
+  for (let i = startIndex; i < input.length; i += 1) {
+    const char = input[i];
+    if (quote) {
+      if (char === quote && input[i - 1] !== "\\") {
+        quote = null;
+      }
+      continue;
+    }
+    if (char === "'" || char === "\"") {
+      quote = char;
+      continue;
+    }
+    if (char === "(") {
+      depth += 1;
+      continue;
+    }
+    if (char === ")") {
+      depth = Math.max(0, depth - 1);
+      continue;
+    }
+    if (depth !== 0) {
+      continue;
+    }
+    for (const keyword of keywords) {
+      if (upper.startsWith(keyword, i)) {
+        const before = i === 0 ? " " : input[i - 1];
+        const after = input[i + keyword.length] || " ";
+        if (isWhitespace(before) && isWhitespace(after)) {
+          return i;
+        }
+      }
+    }
+  }
+
+  return input.length;
+};
+
+const parseTableReference = (input, params) => {
+  const trimmed = input.trim();
+  if (!trimmed) {
+    throw new QueryError("Table reference cannot be empty");
+  }
+
+  if (trimmed.startsWith("(")) {
+    const closing = findMatchingParen(trimmed, 0);
+    if (closing === -1) {
+      throw new QueryError("Subquery is missing closing parenthesis");
+    }
+    const inner = trimmed.slice(1, closing);
+    const remainder = trimmed.slice(closing + 1).trim();
+    if (!remainder) {
+      throw new QueryError("Subquery in FROM clause requires an alias");
+    }
+    let aliasPart = remainder;
+    if (/^AS\s+/i.test(aliasPart)) {
+      aliasPart = aliasPart.replace(/^AS\s+/i, "");
+    }
+    const aliasTokens = aliasPart.split(/\s+/);
+    const alias = aliasTokens[0];
+    if (!alias) {
+      throw new QueryError("Subquery in FROM clause requires an alias");
+    }
+    const subquerySpec = parseSqlStatement(inner, params);
+    return {
+      type: "subquery",
+      alias,
+      subquery: subquerySpec,
+    };
+  }
+
+  const parts = trimmed.split(/\s+/);
+  if (parts.length === 0) {
+    throw new QueryError("Table reference cannot be empty");
+  }
+  const collection = parts[0];
+  let alias = collection;
+  if (parts.length >= 2) {
+    if (parts[1].toUpperCase() === "AS") {
+      alias = parts[2];
+      if (!alias) {
+        throw new QueryError(`Alias expected after AS for table "${collection}"`);
+      }
+    } else {
+      alias = parts[1];
+    }
+  }
+
+  return {
+    type: "collection",
+    collection,
+    alias,
+  };
 };
 
 const tokenize = (input) => {
@@ -308,7 +574,7 @@ const tokenize = (input) => {
 const readValueToken = (tokens, index, params) => {
   const token = tokens[index];
   if (!token) {
-    throw new Error("Expected value in WHERE clause");
+    throw new QueryError("Expected value in WHERE clause");
   }
 
   if (token.type === "literal") {
@@ -327,7 +593,7 @@ const readValueToken = (tokens, index, params) => {
     return { value: null, index: index + 1 };
   }
 
-  throw new Error("Unsupported value in WHERE clause");
+  throw new QueryError("Unsupported value in WHERE clause");
 };
 
 const parseBetween = (field, tokens, index, params) => {
@@ -335,7 +601,7 @@ const parseBetween = (field, tokens, index, params) => {
   const afterStart = tokens[start.index];
 
   if (!afterStart || afterStart.type !== "keyword" || afterStart.value !== "AND") {
-    throw new Error("BETWEEN requires 'AND'");
+    throw new QueryError("BETWEEN requires 'AND'");
   }
 
   const end = readValueToken(tokens, start.index + 1, params);
@@ -356,7 +622,7 @@ const parseInList = (field, tokens, index, params) => {
   while (cursor < tokens.length) {
     const token = tokens[cursor];
     if (!token) {
-      throw new Error("Unexpected end of IN list");
+      throw new QueryError("Unexpected end of IN list");
     }
     if (token.type === ")") {
       return {
@@ -376,7 +642,7 @@ const parseInList = (field, tokens, index, params) => {
     values.push(value);
     cursor = nextIndex;
   }
-  throw new Error("IN list missing closing parenthesis");
+  throw new QueryError("IN list missing closing parenthesis");
 };
 
 const parseComparison = (field, operator, tokens, index, params) => {
@@ -405,7 +671,7 @@ const parseComparison = (field, operator, tokens, index, params) => {
       clause = { [field]: { $lte: value } };
       break;
     default:
-      throw new Error(`Unsupported operator '${operator}'`);
+      throw new QueryError(`Unsupported operator '${operator}'`);
   }
 
   return {
@@ -417,14 +683,14 @@ const parseComparison = (field, operator, tokens, index, params) => {
 const parseConditionTokens = (tokens, startIndex, params) => {
   const fieldToken = tokens[startIndex];
   if (!fieldToken || fieldToken.type !== "identifier") {
-    throw new Error("Expected field name in WHERE clause");
+    throw new QueryError("Expected field name in WHERE clause");
   }
   const field = fieldToken.value;
   let index = startIndex + 1;
   const token = tokens[index];
 
   if (!token) {
-    throw new Error("Unexpected end of WHERE clause");
+    throw new QueryError("Unexpected end of WHERE clause");
   }
 
   if (token.type === "keyword" && token.value === "BETWEEN") {
@@ -435,7 +701,7 @@ const parseConditionTokens = (tokens, startIndex, params) => {
   if (token.type === "keyword" && token.value === "IN") {
     const afterIn = tokens[index + 1];
     if (!afterIn || afterIn.type !== "(") {
-      throw new Error("IN clause must start with '('");
+      throw new QueryError("IN clause must start with '('");
     }
     const parsed = parseInList(field, tokens, index + 2, params);
     return { clause: parsed.clause, nextIndex: parsed.nextIndex };
@@ -445,7 +711,7 @@ const parseConditionTokens = (tokens, startIndex, params) => {
     return parseComparison(field, token.value, tokens, index + 1, params);
   }
 
-  throw new Error(`Unsupported WHERE condition near '${field}'`);
+  throw new QueryError(`Unsupported WHERE condition near '${field}'`);
 };
 
 const parseWhere = (input, params) => {
@@ -462,7 +728,7 @@ const parseWhere = (input, params) => {
     const parsed = parseOrConditions(tokens, 0, params);
     if (parsed.nextIndex < tokens.length) {
       const remaining = tokens.slice(parsed.nextIndex).map((token) => token.value || token.type);
-      throw new Error(`Unexpected tokens ${remaining.join(" ")}`);
+      throw new QueryError(`Unexpected tokens ${remaining.join(" ")}`);
     }
     return parsed.clause;
   } catch (error) {
@@ -473,14 +739,14 @@ const parseWhere = (input, params) => {
 function parseConditionGroup(tokens, index, params) {
   const token = tokens[index];
   if (!token) {
-    throw new Error("Unexpected end of WHERE clause");
+    throw new QueryError("Unexpected end of WHERE clause");
   }
 
   if (token.type === "(") {
     const inner = parseOrConditions(tokens, index + 1, params);
     const closing = tokens[inner.nextIndex];
     if (!closing || closing.type !== ")") {
-      throw new Error("Missing closing parenthesis in WHERE clause");
+      throw new QueryError("Missing closing parenthesis in WHERE clause");
     }
     return {
       clause: inner.clause,
@@ -536,50 +802,55 @@ function parseOrConditions(tokens, index, params) {
   return { clause: { $or: clauses }, nextIndex: cursor };
 }
 
-const parseCollectionRef = (input) => {
-  const trimmed = input.trim();
-  if (!trimmed) {
-    throw new Error("Collection reference cannot be empty");
-  }
-
-  const match = /^([A-Za-z0-9_]+)(?:\s+(?:AS\s+)?([A-Za-z0-9_]+))?$/i.exec(trimmed);
-  if (!match) {
-    throw new Error(`Invalid collection reference "${input}"`);
-  }
-
-  const collection = match[1];
-  const alias = match[2] || collection;
-  return { collection, alias };
-};
-
 const parseQualifiedField = (input) => {
   const trimmed = input.trim();
   const parts = trimmed.split(".");
   if (parts.length < 2) {
-    throw new Error(`Expected qualified field (alias.field) but received "${input}"`);
+    throw new QueryError(`Expected qualified field (alias.field) but received "${input}"`);
   }
   const [alias, ...pathParts] = parts;
   return { alias, path: pathParts.join(".") };
 };
-
-const parseJoinClause = (input) => {
-  const segments = input.split(/\s+ON\s+/i);
-  if (segments.length !== 2) {
-    throw new Error("JOIN clause must include ON <left> = <right>");
+const parseJoinSegment = (segment, params) => {
+  let working = segment.trim();
+  if (!working) {
+    throw new QueryError("JOIN clause cannot be empty");
   }
 
-  const target = parseCollectionRef(segments[0]);
-  const condition = segments[1].trim();
-  const match = /^([A-Za-z0-9_.]+)\s*=\s*([A-Za-z0-9_.]+)$/.exec(condition);
-  if (!match) {
-    throw new Error("Only equality JOIN conditions are supported");
+  let joinType = "inner";
+  let matched = null;
+  for (const pattern of JOIN_PATTERNS) {
+    const match = working.match(pattern.regex);
+    if (match) {
+      joinType = pattern.type;
+      matched = match[0];
+      working = working.slice(match[0].length).trim();
+      break;
+    }
   }
 
-  const left = parseQualifiedField(match[1]);
-  const right = parseQualifiedField(match[2]);
+  if (!matched) {
+    throw new QueryError("JOIN clause must specify JOIN keyword");
+  }
+
+  const onSplit = splitOnKeywordOutsideParens(working, "ON");
+  if (!onSplit) {
+    throw new QueryError("JOIN clause must include ON <left> = <right>");
+  }
+
+  const target = parseTableReference(onSplit.left, params);
+  const condition = onSplit.right;
+  const comparison = /^([A-Za-z0-9_.]+)\s*=\s*([A-Za-z0-9_.]+)$/i.exec(condition);
+  if (!comparison) {
+    throw new QueryError("Only equality JOIN conditions are supported");
+  }
+
+  const left = parseQualifiedField(comparison[1]);
+  const right = parseQualifiedField(comparison[2]);
 
   return {
-    collection: target.collection,
+    type: joinType,
+    target,
     alias: target.alias,
     condition: {
       left,
@@ -588,22 +859,17 @@ const parseJoinClause = (input) => {
   };
 };
 
-const parseFromClause = (input) => {
-  const segments = input.split(/\s+JOIN\s+/i);
+const parseFromClause = (input, params) => {
+  const segments = splitFromSegments(input);
   if (segments.length === 0) {
-    throw new Error("FROM clause cannot be empty");
+    throw new QueryError("FROM clause cannot be empty");
   }
 
-  const base = parseCollectionRef(segments[0]);
+  const base = parseTableReference(segments[0], params);
   const joins = [];
 
-  if (segments.length > 2) {
-    throw new Error("Only a single JOIN is supported at this time");
-  }
-
-  if (segments.length === 2) {
-    const joinClause = segments[1];
-    joins.push(parseJoinClause(joinClause));
+  for (let i = 1; i < segments.length; i += 1) {
+    joins.push(parseJoinSegment(segments[i], params));
   }
 
   return { base, joins };
@@ -623,6 +889,14 @@ const parseSelectExpression = (expression) => {
       alias = parts.pop();
       raw = parts.join(" ");
     }
+  }
+
+  const windowCountMatch = raw.match(/^COUNT\s*\(\s*\*\s*\)\s+OVER\s*\(\s*\)\s*$/i);
+  if (windowCountMatch) {
+    return {
+      type: "window_count",
+      alias: alias || "count_over_all",
+    };
   }
 
   const aggregateMatch = raw.match(/^(SUM|AVG|MIN|MAX|COUNT)\s*\(\s*(\*|[\w.*]+)\s*\)$/i);
@@ -685,7 +959,7 @@ const normalizeSqlInput = (strings, values) => {
   }
 
   if (!Array.isArray(strings) || typeof strings.raw === "undefined") {
-    throw new Error("db.sql requires a template string or raw SQL string");
+    throw new InvalidArgumentError("db.sql requires a template string or raw SQL string");
   }
 
   let sql = "";
@@ -702,40 +976,32 @@ const normalizeSqlInput = (strings, values) => {
   return { sql, params };
 };
 
-const findClauseIndex = (upper, fromIndex, candidates) => {
-  let nextIndex = upper.length;
-
-  for (const candidate of candidates) {
-    const index = upper.indexOf(candidate, fromIndex);
-    if (index !== -1 && index < nextIndex) {
-      nextIndex = index;
-    }
-  }
-
-  return nextIndex;
-};
-
 const parseSqlStatement = (sql, params) => {
   const trimmed = sql.trim().replace(/;$/, "");
   const upper = trimmed.toUpperCase();
 
   if (!upper.startsWith("SELECT ")) {
-    throw new Error("Only SELECT statements are supported");
+    throw new QueryError("Only SELECT statements are supported");
   }
 
-  const fromIndex = upper.indexOf(" FROM ");
-  if (fromIndex === -1) {
-    throw new Error("SELECT statement must include FROM clause");
+  const fromRegex = /\sFROM\s|\sFROM\(/i;
+  const fromMatch = fromRegex.exec(upper);
+  if (!fromMatch) {
+    throw new QueryError("SELECT statement must include FROM clause");
   }
+  const fromIndex = fromMatch.index;
+  const fromToken = fromMatch[0];
 
   const selectPart = trimmed.slice("SELECT ".length, fromIndex).trim();
-  let cursor = fromIndex + " FROM ".length;
+  let cursor = fromIndex + fromToken.length;
+  if (fromToken.endsWith("(")) {
+    cursor -= 1;
+  }
 
-  const clauseCandidates = [" WHERE ", " GROUP BY ", " HAVING ", " ORDER BY ", " LIMIT "];
-  const nextClauseIndex = findClauseIndex(upper, cursor, clauseCandidates);
+  const nextClauseIndex = findNextClauseIndex(trimmed, cursor, CLAUSE_KEYWORDS);
   const fromPart = trimmed.slice(cursor, nextClauseIndex).trim();
   if (!fromPart) {
-    throw new Error("FROM clause must specify a collection");
+    throw new QueryError("FROM clause must specify a collection");
   }
 
   cursor = nextClauseIndex;
@@ -747,37 +1013,41 @@ const parseSqlStatement = (sql, params) => {
   let limitPart = null;
 
   while (cursor < trimmed.length) {
-    const remainingUpper = upper.slice(cursor);
-    if (remainingUpper.startsWith(" WHERE ")) {
-      const start = cursor + " WHERE ".length;
-      const end = findClauseIndex(upper, start, [" GROUP BY ", " HAVING ", " ORDER BY ", " LIMIT "]);
+    if (upper.startsWith("WHERE", cursor)) {
+      let start = cursor + "WHERE".length;
+      while (start < trimmed.length && /\s/.test(trimmed[start])) start += 1;
+      const end = findNextClauseIndex(trimmed, start, CLAUSE_KEYWORDS);
       wherePart = trimmed.slice(start, end).trim();
       cursor = end;
       continue;
     }
-    if (remainingUpper.startsWith(" GROUP BY ")) {
-      const start = cursor + " GROUP BY ".length;
-      const end = findClauseIndex(upper, start, [" HAVING ", " ORDER BY ", " LIMIT "]);
+    if (upper.startsWith("GROUP BY", cursor)) {
+      let start = cursor + "GROUP BY".length;
+      while (start < trimmed.length && /\s/.test(trimmed[start])) start += 1;
+      const end = findNextClauseIndex(trimmed, start, CLAUSE_KEYWORDS);
       groupPart = trimmed.slice(start, end).trim();
       cursor = end;
       continue;
     }
-    if (remainingUpper.startsWith(" HAVING ")) {
-      const start = cursor + " HAVING ".length;
-      const end = findClauseIndex(upper, start, [" ORDER BY ", " LIMIT "]);
+    if (upper.startsWith("HAVING", cursor)) {
+      let start = cursor + "HAVING".length;
+      while (start < trimmed.length && /\s/.test(trimmed[start])) start += 1;
+      const end = findNextClauseIndex(trimmed, start, CLAUSE_KEYWORDS);
       havingPart = trimmed.slice(start, end).trim();
       cursor = end;
       continue;
     }
-    if (remainingUpper.startsWith(" ORDER BY ")) {
-      const start = cursor + " ORDER BY ".length;
-      const end = findClauseIndex(upper, start, [" LIMIT "]);
+    if (upper.startsWith("ORDER BY", cursor)) {
+      let start = cursor + "ORDER BY".length;
+      while (start < trimmed.length && /\s/.test(trimmed[start])) start += 1;
+      const end = findNextClauseIndex(trimmed, start, CLAUSE_KEYWORDS);
       orderPart = trimmed.slice(start, end).trim();
       cursor = end;
       continue;
     }
-    if (remainingUpper.startsWith(" LIMIT ")) {
-      const start = cursor + " LIMIT ".length;
+    if (upper.startsWith("LIMIT", cursor)) {
+      let start = cursor + "LIMIT".length;
+      while (start < trimmed.length && /\s/.test(trimmed[start])) start += 1;
       limitPart = trimmed.slice(start).trim();
       cursor = trimmed.length;
       continue;
@@ -788,7 +1058,8 @@ const parseSqlStatement = (sql, params) => {
   const selectExpressions = splitOnComma(selectPart).map((expression) =>
     withClause("SELECT", expression, () => parseSelectExpression(expression)),
   );
-  const fromSpec = withClause("FROM", fromPart, () => parseFromClause(fromPart));
+  const windowFunctions = selectExpressions.filter((expr) => expr.type === "window_count");
+  const fromSpec = withClause("FROM", fromPart, () => parseFromClause(fromPart, params));
   const hasWildcard = selectExpressions.some((expr) => expr.type === "wildcard");
   const aliasWildcards = selectExpressions.filter((expr) => expr.type === "aliasWildcard");
   const hasAliasWildcard = aliasWildcards.length > 0;
@@ -796,7 +1067,7 @@ const parseSqlStatement = (sql, params) => {
   const isAggregate = aggregates.length > 0;
 
   if (hasWildcard && isAggregate) {
-    throw new Error("Cannot mix '*' with aggregate expressions");
+    throw new QueryError("Cannot mix '*' with aggregate expressions");
   }
 
   const fields = selectExpressions.filter((expr) => expr.type === "field");
@@ -809,7 +1080,12 @@ const parseSqlStatement = (sql, params) => {
     );
   }
   let projection = null;
-  if (!isAggregate && fromSpec.joins.length === 0 && fields.length > 0) {
+  if (
+    !isAggregate &&
+    fromSpec.base.type === "collection" &&
+    fromSpec.joins.length === 0 &&
+    fields.length > 0
+  ) {
     projection = {};
     fields.forEach((expr) => {
       if (!expr.field.includes(".")) {
@@ -819,15 +1095,19 @@ const parseSqlStatement = (sql, params) => {
   }
 
   if (fromSpec.joins.length > 0 && hasWildcard) {
-    throw new Error("SELECT * is not supported with JOIN queries");
+    throw new QueryError("SELECT * is not supported with JOIN queries");
   }
 
   const aliasLookup = new Map();
   aliasLookup.set(fromSpec.base.alias, fromSpec.base.alias);
-  aliasLookup.set(fromSpec.base.collection, fromSpec.base.alias);
+  if (fromSpec.base.type === "collection") {
+    aliasLookup.set(fromSpec.base.collection, fromSpec.base.alias);
+  }
   for (const join of fromSpec.joins) {
     aliasLookup.set(join.alias, join.alias);
-    aliasLookup.set(join.collection, join.alias);
+    if (join.target.type === "collection") {
+      aliasLookup.set(join.target.collection, join.alias);
+    }
   }
 
   for (const expr of aliasWildcards) {
@@ -845,17 +1125,31 @@ const parseSqlStatement = (sql, params) => {
   const having = havingPart ? withClause("HAVING", havingPart, () => parseWhere(havingPart, params)) : null;
   const groupBy = groupPart ? splitOnComma(groupPart).map((entry) => entry.trim()).filter(Boolean) : [];
   const orderBy = parseOrderBy(orderPart);
-  const limit = limitPart ? Number(limitPart) : null;
-
-  if (limit !== null && (!Number.isFinite(limit) || limit < 0)) {
-    throw new Error("LIMIT must be a non-negative number");
+  let limit = null;
+  let offset = 0;
+  if (limitPart) {
+    const limitMatch = limitPart.match(/^([0-9]+)(?:\s+OFFSET\s+([0-9]+))?$/i);
+    if (!limitMatch) {
+      throw new QueryError("LIMIT clause must be of the form 'LIMIT <n>' or 'LIMIT <n> OFFSET <m>'");
+    }
+    limit = Number(limitMatch[1]);
+    if (!Number.isFinite(limit) || limit < 0) {
+      throw new QueryError("LIMIT must be a non-negative number");
+    }
+    if (limitMatch[2] !== undefined) {
+      offset = Number(limitMatch[2]);
+      if (!Number.isFinite(offset) || offset < 0) {
+        throw new QueryError("OFFSET must be a non-negative number");
+      }
+    }
   }
 
   return {
-    collection: fromSpec.base.collection,
+    base: fromSpec.base,
     baseAlias: fromSpec.base.alias,
     joins: fromSpec.joins,
     selectExpressions,
+    windowFunctions,
     hasWildcard,
     hasAliasWildcard,
     isAggregate,
@@ -865,6 +1159,7 @@ const parseSqlStatement = (sql, params) => {
     groupBy,
     orderBy,
     limit,
+    offset,
   };
 };
 
@@ -902,7 +1197,7 @@ const applyFieldSelection = (contexts, spec) =>
         : {};
 
     for (const expr of spec.selectExpressions) {
-      if (expr.type === "wildcard" || expr.type === "aggregate") {
+      if (expr.type === "wildcard" || expr.type === "aggregate" || expr.type === "window_count") {
         continue;
       }
 
@@ -940,6 +1235,23 @@ const sortResults = (rows, orderBy) => {
   });
 };
 
+const applyWindowFunctions = (rows, windowFunctions) => {
+  if (!windowFunctions || windowFunctions.length === 0) {
+    return rows;
+  }
+
+  const totalCount = rows.length;
+  return rows.map((row) => {
+    const output = row;
+    for (const fn of windowFunctions) {
+      if (fn.type === "window_count") {
+        setByPath(output, fn.alias, totalCount);
+      }
+    }
+    return output;
+  });
+};
+
 const aggregateDocuments = (contexts, spec) => {
   const groups = new Map();
   const hasGroup = spec.groupBy.length > 0;
@@ -960,7 +1272,7 @@ const aggregateDocuments = (contexts, spec) => {
           }
           const factory = AGGREGATE_FACTORIES[expr.func];
           if (!factory) {
-            throw new Error(`Unsupported aggregate function '${expr.func}'`);
+            throw new QueryError(`Unsupported aggregate function '${expr.func}'`);
           }
           return {
             expr,
@@ -1025,38 +1337,113 @@ const aggregateDocuments = (contexts, spec) => {
 };
 
 const buildContexts = async (db, spec) => {
-  const baseCollection = db.collection(spec.collection);
-  if (!baseCollection) {
-    return [];
+  let baseRows = [];
+
+  if (spec.base.type === "collection") {
+    const baseCollection = db.collection(spec.base.collection);
+    if (!baseCollection) {
+      return [];
+    }
+    const baseOptions = {};
+    if (spec.joins.length === 0 && spec.projection) {
+      baseOptions.projection = spec.projection;
+    }
+    baseRows = await baseCollection.find(spec.filter || {}, baseOptions);
+  } else {
+    baseRows = await executeSqlSpec(db, spec.base.subquery);
   }
 
-  const baseOptions = {};
-  if (spec.joins.length === 0 && spec.projection) {
-    baseOptions.projection = spec.projection;
-  }
-
-  const baseDocs = await baseCollection.find(spec.filter || {}, baseOptions);
-  let contexts = baseDocs.map((doc) => ({
-    aliases: new Map([[spec.baseAlias, doc]]),
+  let contexts = baseRows.map((row) => ({
+    aliases: new Map([[spec.baseAlias, row]]),
   }));
 
+  const subqueryCache = new Map();
+
   for (const join of spec.joins) {
-    const joinCollection = db.collection(join.collection);
-    if (!joinCollection) {
-      return [];
+    let joinCollection = null;
+    if (join.target.type === "collection") {
+      joinCollection = db.collection(join.target.collection);
+      if (!joinCollection) {
+        if (join.type === "left") {
+          contexts = contexts.map((context) => {
+            const aliases = new Map(context.aliases);
+            aliases.set(join.alias, null);
+            return { aliases };
+          });
+          continue;
+        }
+        return [];
+      }
     }
 
     const nextContexts = [];
+    if (contexts.length === 0) {
+      break;
+    }
+
     for (const context of contexts) {
-      const leftField = join.condition.left.alias + '.' + join.condition.left.path;
-      const leftValue = resolveFieldFromContext(context, leftField, spec.baseAlias);
-      if (leftValue === undefined) {
+      const leftUsesTarget = join.condition.left.alias === join.alias;
+      const rightUsesTarget = join.condition.right.alias === join.alias;
+
+      if (leftUsesTarget && rightUsesTarget) {
+        throw new QueryError("JOIN condition must reference the joined table and an existing table");
+      }
+
+      const sourceCondition = leftUsesTarget ? join.condition.right : join.condition.left;
+      const targetPath = leftUsesTarget ? join.condition.left.path : join.condition.right.path;
+      const sourceField = `${sourceCondition.alias}.${sourceCondition.path}`;
+      const sourceValue = resolveFieldFromContext(context, sourceField, spec.baseAlias);
+
+      if (join.target.type === "collection") {
+        if (sourceValue === undefined) {
+          if (join.type === "left") {
+            const aliases = new Map(context.aliases);
+            aliases.set(join.alias, null);
+            nextContexts.push({ aliases });
+          }
+          continue;
+        }
+
+        const filter = {};
+        setByPath(filter, targetPath, sourceValue);
+        const matches = await joinCollection.find(filter, { projection: null });
+
+        if (matches.length === 0) {
+          if (join.type === "left") {
+            const aliases = new Map(context.aliases);
+            aliases.set(join.alias, null);
+            nextContexts.push({ aliases });
+          }
+          continue;
+        }
+
+        for (const match of matches) {
+          const aliases = new Map(context.aliases);
+          aliases.set(join.alias, match);
+          nextContexts.push({ aliases });
+        }
         continue;
       }
 
-      const filter = {};
-      setByPath(filter, join.condition.right.path, leftValue);
-      const matches = await joinCollection.find(filter, { projection: null });
+      if (!subqueryCache.has(join.alias)) {
+        const rows = await executeSqlSpec(db, join.target.subquery);
+        subqueryCache.set(join.alias, rows);
+      }
+      const dataset = subqueryCache.get(join.alias);
+
+      const matches = dataset.filter((row) => {
+        const candidate = getByPath(row, targetPath);
+        return compareValues(candidate, sourceValue) === 0;
+      });
+
+      if (matches.length === 0) {
+        if (join.type === "left") {
+          const aliases = new Map(context.aliases);
+          aliases.set(join.alias, null);
+          nextContexts.push({ aliases });
+        }
+        continue;
+      }
 
       for (const match of matches) {
         const aliases = new Map(context.aliases);
@@ -1071,12 +1458,27 @@ const buildContexts = async (db, spec) => {
     }
   }
 
-  return contexts;
+  if (!spec.filter || (spec.base.type === "collection" && spec.joins.length === 0)) {
+    return contexts;
+  }
+
+  const filtered = contexts.filter((context) => {
+    const combined = {};
+    for (const [alias, doc] of context.aliases.entries()) {
+      combined[alias] = doc;
+      if (alias === spec.baseAlias && doc && typeof doc === "object") {
+        Object.assign(combined, doc);
+      }
+    }
+    return matchFilter(combined, spec.filter);
+  });
+
+  return filtered;
 };
 
 const executeSqlSpec = async (db, spec) => {
   if (spec.having && !spec.isAggregate && spec.groupBy.length === 0) {
-    throw new Error('HAVING clause requires aggregate expressions or GROUP BY');
+    throw new QueryError('HAVING clause requires aggregate expressions or GROUP BY');
   }
 
   const contexts = await buildContexts(db, spec);
@@ -1087,6 +1489,10 @@ const executeSqlSpec = async (db, spec) => {
   if (!spec.isAggregate) {
     let rows = applyFieldSelection(contexts, spec);
     rows = sortResults(rows, spec.orderBy);
+    rows = applyWindowFunctions(rows, spec.windowFunctions);
+    if (spec.offset) {
+      rows = rows.slice(spec.offset);
+    }
     if (spec.limit !== null) {
       rows = rows.slice(0, spec.limit);
     }
@@ -1100,6 +1506,11 @@ const executeSqlSpec = async (db, spec) => {
   }
 
   rows = sortResults(rows, spec.orderBy);
+  rows = applyWindowFunctions(rows, spec.windowFunctions);
+
+  if (spec.offset) {
+    rows = rows.slice(spec.offset);
+  }
 
   if (spec.limit !== null) {
     rows = rows.slice(0, spec.limit);

@@ -2,6 +2,7 @@
 
 const { cloneDeep, getByPath } = require("../utils/objectUtils");
 const { compareValues, matchFilter } = require("./operators");
+const { InvalidArgumentError } = require("../errors");
 const Sort = {
   ASC: 1,
   DESC: -1,
@@ -32,7 +33,7 @@ const projectDocument = (doc, projection) => {
   const isExclusive = keys.some((key) => !projection[key]);
 
   if (isInclusive && isExclusive) {
-    throw new Error("Projection cannot mix inclusive and exclusive fields");
+    throw new InvalidArgumentError("Projection cannot mix inclusive and exclusive fields");
   }
 
   if (isInclusive) {
@@ -77,7 +78,7 @@ const normalizeDirection = (value) => {
     return -1;
   }
 
-  throw new Error(`Unsupported sort direction: ${value}`);
+  throw new InvalidArgumentError(`Unsupported sort direction: ${value}`);
 };
 
 const applySort = (docs, sortSpec) => {

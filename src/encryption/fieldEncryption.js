@@ -2,6 +2,7 @@
 
 const { randomBytes, createCipheriv, createDecipheriv, createHash } = require("crypto");
 const { cloneDeep, getByPath, setByPath, unsetByPath } = require("../utils/objectUtils");
+const { InvalidArgumentError } = require("../errors");
 
 const ENCRYPTED_FLAG = "__jsonvaultEncrypted";
 const DEFAULT_ALGORITHM = "aes-256-gcm";
@@ -67,12 +68,12 @@ const decryptValue = (payload, key) => {
 
 const createFieldEncryption = (config = {}) => {
   if (!config.secret) {
-    throw new Error("Encryption requires a secret");
+    throw new InvalidArgumentError("Encryption requires a secret");
   }
 
   const fields = ensureArray(config.fields).filter(Boolean);
   if (fields.length === 0) {
-    throw new Error("Encryption requires at least one field");
+    throw new InvalidArgumentError("Encryption requires at least one field");
   }
 
   const algorithm = config.algorithm || DEFAULT_ALGORITHM;

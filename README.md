@@ -5,33 +5,54 @@
 [![npm version](https://img.shields.io/npm/v/jsonvault.svg?style=flat)](https://www.npmjs.com/package/jsonvault)
 [![Node](https://img.shields.io/badge/node->=18-brightgreen.svg?style=flat)](https://nodejs.org/)
 [![License](https://img.shields.io/npm/l/jsonvault.svg?style=flat)](LICENSE)
+[![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/G2G21MUP3D)
+
+---
+
+## Highlights
+
+- ⚡️ **Instant setup** – drop in a folder path, get a document store with SQL, filters, and streaming cursors.
+- 🔐 **Security baked in** – field-level encryption, row policies, and typed errors keep data guarded end-to-end.
+- 🧰 **Friendly tooling** – rich CLI, migration scaffolds, and TypeScript definitions make automation effortless.
+- 🚀 **Zero server** – all features run inside your process; perfect for CLIs, edge runtimes, and local-first apps.
+
+## Quick Links
+
+- 📚 [Full documentation](https://team-bungfro.github.io/jsonvault)
+- 🧪 [Examples folder](examples) &nbsp; • &nbsp; [Benchmarks](benchmarks)
+- 💡 [Policies guide](docs-site/docs/concepts/policies.mdx) &nbsp; • &nbsp; [Error reference](docs-site/docs/reference/errors.mdx)
+- 🛠️ `npx jsonvault migrate ./data up --dir=./migrations`
 
 ---
 
 ## Table of Contents
 
-1. [Why jsonvault](#why-jsonvault)
-2. [Install](#install)
-3. [Hello jsonvault](#hello-jsonvault)
-4. [Core Capabilities](#core-capabilities)
-5. [Data Access](#data-access)
-6. [Data Integrity](#data-integrity)
-7. [Storage & Scale](#storage--scale)
-8. [Tooling & Automation](#tooling--automation)
-9. [Change Log](#change-log)
-10. [Watching Changes](#watching-changes)
-11. [Documentation](#documentation)
-12. [Examples](#examples)
-13. [License](#license)
+1. [Highlights](#highlights)
+2. [Quick Links](#quick-links)
+3. [Why jsonvault](#why-jsonvault)
+4. [Install](#install)
+5. [Hello jsonvault](#hello-jsonvault)
+6. [Core Capabilities](#core-capabilities)
+7. [Data Access](#data-access)
+8. [Data Integrity](#data-integrity)
+9. [Storage & Scale](#storage--scale)
+10. [Policies & Access Control](#policies--access-control)
+11. [Error Handling](#error-handling)
+12. [Tooling & Automation](#tooling--automation)
+13. [Change Log](#change-log)
+14. [Watching Changes](#watching-changes)
+15. [Documentation](#documentation)
+16. [Examples](#examples)
+17. [License](#license)
 
 ---
 
 ## Why jsonvault
 
-- **Files you can inspect** – every collection is a plain JSON file (or chunked JSON) that plays nicely with git, rsync, and existing tooling.
-- **Query power without a server** – expressive filters (`$and`/`$regex`/`$elemMatch`), compiled JSONPath, streaming cursors, and SQL that now speaks `JOIN` and `HAVING`.
-- **Safety nets included** – declarative schemas, TTL indexes, change log replay, field-level encryption, and transactional updates.
-- **Developer-first ergonomics** – async API, easy hooks, TypeScript definitions, `jsonvault` CLI, and code-first migrations.
+- 📁 **Files you can inspect** – every collection is a plain JSON file (or chunked JSON) that plays nicely with git, rsync, and existing tooling.
+- 🧮 **Query power without a server** – expressive filters (`$and`/`$regex`/`$elemMatch`), compiled JSONPath, streaming cursors, and SQL that now speaks `JOIN` and `HAVING`.
+- 🛡️ **Safety nets included** – declarative schemas, TTL indexes, change log replay, field-level encryption, and transactional updates.
+- 👩‍💻 **Developer-first ergonomics** – async API, easy hooks, TypeScript definitions, `jsonvault` CLI, and code-first migrations.
 
 ---
 
@@ -40,6 +61,8 @@
 | npm | pnpm | bun |
 | --- | --- | --- |
 | `npm install jsonvault` | `pnpm add jsonvault` | `bun add jsonvault` |
+
+> Need a one-off run? Use `npx jsonvault list ./data` right after install to explore your collections.
 
 ---
 
@@ -67,16 +90,20 @@ const { JsonDatabase, Sort } = require("jsonvault");
 
 ## Core Capabilities
 
-- **Document API** – insert, find, update, replace, delete, count, distinct, and more.
-- **Hooks & validators** – plug custom logic before/after writes, enrich documents, or enforce rules.
-- **Schema engine** – defaults, nested fields, transforms, and custom validation callbacks.
-- **Encryption & partitioning** – optional per-field encryption plus chunked storage for large collections.
-- **Indexes** – unique, secondary, and TTL indexes for query acceleration and automatic expiry.
-- **Tooling** – SQL + JSONPath query helper, file-based migrations, CLI utilities, change log replay, and backups.
+| | |
+| --- | --- |
+| 📄 **Document API** | insert, find, update, replace, delete, count, distinct, and more. |
+| 🧩 **Hooks & validators** | plug custom logic before/after writes, enrich documents, or enforce rules. |
+| 🧬 **Schema engine** | defaults, nested fields, transforms, and custom validation callbacks. |
+| 🔐 **Encryption & partitioning** | optional per-field encryption plus chunked storage for large collections. |
+| ⚙️ **Indexes** | unique, secondary, and TTL indexes for query acceleration and automatic expiry. |
+| 🛠️ **Tooling** | SQL + JSONPath helper, file-based migrations, CLI utilities, change log replay, and backups. |
 
 ---
 
 ## Data Access
+
+> Choose the flavour you prefer: fluent filter objects, SQL, or pre-compiled streams – they all land on the same engine.
 
 ### Collections & Queries
 
@@ -139,7 +166,9 @@ Supported today:
 
 - `SELECT` with field aliases plus aggregates (`SUM`, `AVG`, `MIN`, `MAX`, `COUNT`)
 - `WHERE` with `=`, `!=`, `<`, `<=`, `>`, `>=`, `IN (...)`, `BETWEEN … AND …`
-- Single inner `JOIN` on equality, `GROUP BY`, `HAVING`, `ORDER BY`, and `LIMIT`
+- Multiple `JOIN`s (including `LEFT JOIN`) with table aliases; `GROUP BY`, `HAVING`, `ORDER BY`
+- Sub-selects in `FROM` clauses: `FROM (SELECT ...) AS alias`
+- Pagination helpers: `LIMIT`, `OFFSET`, `COUNT(*) OVER()` for total counts
 - Template parameters (`${value}`) and JSONPath passthrough (`db.sql("$.orders[?(@.total > 1000)]")`)
 
 ### Compiled Queries & Streaming
@@ -163,6 +192,83 @@ for await (const order of db.stream(filterQuery)) {
 ```
 
 Compiled queries make it easy to reuse filters and iterate lazily over results. The string form supports expressions such as `$.collection[?(@.field > value && @.other == 'foo')]` with basic `&&`/`||`.
+
+---
+
+## Policies & Access Control
+
+Secure reads and writes without a separate service layer. Policies run on every operation and can redact fields before they leave the database.
+
+```js
+const db = await JsonDatabase.open({ path: "./data" });
+
+db.policy("orders", {
+  read({ row, ctx }) {
+    if (!ctx) return false;
+    return ctx.role === "admin" || row.userId === ctx.userId;
+  },
+  write({ previous, next, ctx, operation }) {
+    if (!ctx) return false;
+    if (ctx.role === "admin") return true;
+    if (operation === "insert") return next?.userId === ctx.userId;
+    if (operation === "update") {
+      return previous?.userId === ctx.userId && next?.userId === ctx.userId;
+    }
+    if (operation === "delete") return previous?.userId === ctx.userId;
+    return false;
+  },
+  redact({ row, ctx }) {
+    return ctx?.role === "admin" ? row : { ...row, internalNotes: undefined };
+  },
+});
+
+const scoped = db.with({ userId: "alice", role: "user" });
+
+const aliceOrders = await scoped.collection("orders").find();
+// -> only Alice's rows, internalNotes removed
+
+try {
+  await scoped.collection("orders").insertOne({ userId: "bob", total: 10 });
+} catch (error) {
+  if (error instanceof PolicyDeniedError) {
+    console.log("Denied:", error.message);
+  }
+}
+```
+
+- `db.with(context)` uses async-local propagation so nested calls (collection API, SQL helper, streams) inherit the same context.
+- `db.get("orders/o1")` runs through the policy pipeline and returns a redacted document (or `null`).
+- Failed writes raise `PolicyDeniedError`, which you can map to HTTP `403` responses.
+
+---
+
+## Error Handling
+
+Operations throw typed errors so you can branch on intent instead of parsing strings. Every error includes a stable `.code` and optional `.details`.
+
+| Class | Code | When it fires |
+| ----- | ---- | ------------- |
+| `InvalidArgumentError` | `ERR_INVALID_ARGUMENT` | Bad input (missing path, malformed config, invalid operator, etc.) |
+| `InvalidOperationError` | `ERR_INVALID_OPERATION` | Action is not permitted in the current state (e.g. primary key change, changelog disabled) |
+| `AlreadyExistsError` | `ERR_ALREADY_EXISTS` | Resource collisions such as duplicate documents or migrations |
+| `NotFoundError` | `ERR_NOT_FOUND` | Requested migration/adaptor/file is missing |
+| `QueryError` | `ERR_QUERY` | SQL / compiled query parsing and execution failures |
+| `PolicyDeniedError` | `ERR_POLICY_DENIED` | Access blocked by a collection policy |
+| `JsonVaultError` | `ERR_JSONVAULT` | Base class; generic internal failures bubble up with this code |
+
+Use them in higher layers:
+
+```js
+try {
+  await db.collection("orders").insertOne(payload);
+} catch (error) {
+  if (error instanceof AlreadyExistsError) {
+    res.status(409).json({ code: error.code, message: error.message });
+    return;
+  }
+  throw error; // fall back to global handler
+}
+```
 
 ---
 

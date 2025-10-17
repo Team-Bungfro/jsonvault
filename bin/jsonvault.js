@@ -7,6 +7,11 @@ const fs = require("fs/promises");
 const crypto = require("crypto");
 
 const { JsonDatabase } = require("../src");
+const {
+  InvalidArgumentError,
+  NotFoundError,
+  InvalidOperationError,
+} = require("../src/errors");
 const migrationApi = require("../src/migrations");
 
 const usage = () => {
@@ -82,7 +87,7 @@ const parseJson = (value, fallback = {}) => {
   try {
     return JSON.parse(value);
   } catch (error) {
-    throw new Error(`Failed to parse JSON: ${value}`);
+    throw new InvalidArgumentError(`Failed to parse JSON: ${value}`);
   }
 };
 
@@ -97,7 +102,7 @@ const loadConfig = async (configPath) => {
     contents = await fs.readFile(resolved, "utf8");
   } catch (error) {
     if (error.code === "ENOENT") {
-      throw new Error(`Config file not found: ${configPath}`);
+      throw new NotFoundError(`Config file not found: ${configPath}`);
     }
     throw error;
   }
@@ -106,7 +111,7 @@ const loadConfig = async (configPath) => {
   try {
     parsed = JSON.parse(contents);
   } catch (error) {
-    throw new Error(`Failed to parse config "${configPath}": ${error.message}`);
+    throw new InvalidArgumentError(`Failed to parse config "${configPath}": ${error.message}`);
   }
 
   const rootDir = path.dirname(resolved);
@@ -220,19 +225,19 @@ const toBoolean = (value) => {
 
 const parseDocumentPath = (input) => {
   if (!input) {
-    throw new Error("Document path is required (collection/id)");
+    throw new InvalidArgumentError("Document path is required (collection/id)");
   }
 
   const parts = input.split("/").filter(Boolean);
   if (parts.length < 2) {
-    throw new Error("Document path must be in the form collection/id");
+    throw new InvalidArgumentError("Document path must be in the form collection/id");
   }
 
   const collection = parts.shift();
   const id = parts.join("/");
 
   if (!collection || !id) {
-    throw new Error("Document path must include collection and id");
+    throw new InvalidArgumentError("Document path must include collection and id");
   }
 
   return { collection, id };
@@ -369,7 +374,7 @@ const commands = {
 
   async put(dbPath, dbOptions, docPath, jsonBody) {
     if (!jsonBody) {
-      throw new Error("put requires a JSON document argument");
+      throw new InvalidArgumentError("put requires a JSON document argument");
     }
 
     const { collection, id } = parseDocumentPath(docPath);
@@ -377,7 +382,7 @@ const commands = {
     try {
       document = JSON.parse(jsonBody);
     } catch (error) {
-      throw new Error(`Invalid JSON body: ${error.message}`);
+      throw new InvalidArgumentError(`Invalid JSON body: ${error.message}`);
     }
 
     await withDatabase(dbPath, dbOptions, async (db) => {
@@ -387,7 +392,7 @@ const commands = {
       if (!Object.prototype.hasOwnProperty.call(document, primaryKey)) {
         document[primaryKey] = id;
       } else if (String(document[primaryKey]) !== String(id)) {
-        throw new Error(
+        throw new InvalidArgumentError(
           `Document primary key (${primaryKey}) must match id '${id}'`,
         );
       }
@@ -447,7 +452,7 @@ const commands = {
 
   async query(dbPath, dbOptions, sqlText) {
     if (!sqlText) {
-      throw new Error("query requires <sql>");
+      throw new InvalidArgumentError("query requires <sql>");
     }
 
     await withDatabase(dbPath, dbOptions, async (db) => {
@@ -469,7 +474,7 @@ const commands = {
     if (action === "create") {
       const name = opts.name;
       if (!name) {
-        throw new Error("migrate create requires <name>");
+        throw new InvalidArgumentError("migrate create requires <name>");
       }
       const result = await migrationApi.createMigration({
         directory,
@@ -489,7 +494,7 @@ const commands = {
       if (stepRaw !== undefined) {
         const parsed = Number(stepRaw);
         if (!Number.isInteger(parsed) || parsed <= 0) {
-          throw new Error("step must be a positive integer");
+          throw new InvalidArgumentError("step must be a positive integer");
         }
         result.step = parsed;
       }
@@ -549,7 +554,7 @@ const commands = {
           break;
         }
         default:
-          throw new Error(`Unknown migrate action "${action}"`);
+          throw new InvalidArgumentError(`Unknown migrate action "${action}"`);
       }
     });
   },
@@ -567,19 +572,19 @@ const commands = {
 
     await withDatabase(dbPath, openOptions, async (db) => {
       if (!db.changeLog) {
-        throw new Error("Change log is not enabled for this database");
+        throw new InvalidOperationError("Change log is not enabled for this database");
       }
 
       const limitRaw = opts.limit === undefined ? 50 : Number(opts.limit);
       if (!Number.isFinite(limitRaw) || limitRaw <= 0) {
-        throw new Error("limit must be a positive number");
+        throw new InvalidArgumentError("limit must be a positive number");
       }
 
       const readOptions = { limit: limitRaw };
       if (opts.from !== undefined) {
         const fromValue = Number(opts.from);
         if (!Number.isFinite(fromValue) || fromValue < 0) {
-          throw new Error("from must be a non-negative number");
+          throw new InvalidArgumentError("from must be a non-negative number");
         }
         readOptions.from = fromValue;
       }
@@ -613,13 +618,13 @@ const main = async () => {
     switch (command) {
       case "list": {
         const { path: dbPath } = resolveDbPathArg(positional, defaultDbPath);
-        if (!dbPath) throw new Error("list requires <path>");
+        if (!dbPath) throw new InvalidArgumentError("list requires <path>");
         await commands.list(dbPath, buildDbOptions(options, dbConfig));
         break;
       }
       case "stats": {
         const { path: dbPath } = resolveDbPathArg(positional, defaultDbPath);
-        if (!dbPath) throw new Error("stats requires <path>");
+        if (!dbPath) throw new InvalidArgumentError("stats requires <path>");
         await commands.stats(dbPath, buildDbOptions(options, dbConfig));
         break;
       }
@@ -627,7 +632,7 @@ const main = async () => {
         const { path: dbPath, consumed } = resolveDbPathArg(positional, defaultDbPath, 1);
         const remaining = positional.slice(consumed);
         if (!dbPath || remaining.length < 1) {
-          throw new Error("dump requires <path> and <collection>");
+          throw new InvalidArgumentError("dump requires <path> and <collection>");
         }
         await commands.dump(
           dbPath,
@@ -641,7 +646,7 @@ const main = async () => {
         const { path: dbPath, consumed } = resolveDbPathArg(positional, defaultDbPath, 1);
         const remaining = positional.slice(consumed);
         if (!dbPath || remaining.length < 1) {
-          throw new Error("export requires <path> and <collection>");
+          throw new InvalidArgumentError("export requires <path> and <collection>");
         }
         await commands.export(
           dbPath,
@@ -655,7 +660,7 @@ const main = async () => {
         const { path: dbPath, consumed } = resolveDbPathArg(positional, defaultDbPath, 2);
         const remaining = positional.slice(consumed);
         if (!dbPath || remaining.length < 2) {
-          throw new Error("put requires <path> and <json>");
+          throw new InvalidArgumentError("put requires <path> and <json>");
         }
         await commands.put(
           dbPath,
@@ -669,7 +674,7 @@ const main = async () => {
         const { path: dbPath, consumed } = resolveDbPathArg(positional, defaultDbPath, 1);
         const remaining = positional.slice(consumed);
         if (!dbPath || remaining.length < 1) {
-          throw new Error("get requires <path>");
+          throw new InvalidArgumentError("get requires <path>");
         }
         await commands.get(
           dbPath,
@@ -682,7 +687,7 @@ const main = async () => {
         const { path: dbPath, consumed } = resolveDbPathArg(positional, defaultDbPath, 1);
         const remaining = positional.slice(consumed);
         if (!dbPath || remaining.length < 1) {
-          throw new Error("query requires <path> and <sql>");
+          throw new InvalidArgumentError("query requires <path> and <sql>");
         }
         await commands.query(
           dbPath,
@@ -694,7 +699,7 @@ const main = async () => {
       case "snapshot": {
         const { path: dbPath } = resolveDbPathArg(positional, defaultDbPath);
         if (!dbPath) {
-          throw new Error("snapshot requires <path>");
+          throw new InvalidArgumentError("snapshot requires <path>");
         }
         await commands.snapshot(
           dbPath,
@@ -716,7 +721,7 @@ const main = async () => {
         }
         const remaining = positional.slice(consumed);
         if (!dbPath) {
-          throw new Error("migrate requires <path>");
+          throw new InvalidArgumentError("migrate requires <path>");
         }
         const migrateAction = remaining[0] || "up";
         const migrateOptions = stripDbOptions(options);
@@ -726,7 +731,7 @@ const main = async () => {
         if (migrateAction === "create") {
           const nameParts = remaining.slice(1);
           if (nameParts.length === 0) {
-            throw new Error("migrate create requires <name>");
+            throw new InvalidArgumentError("migrate create requires <name>");
           }
           migrateOptions.name = nameParts.join(" ");
         }
@@ -751,11 +756,11 @@ const main = async () => {
         }
         const remaining = positional.slice(consumed);
         if (!dbPath) {
-          throw new Error("changelog requires <path>");
+          throw new InvalidArgumentError("changelog requires <path>");
         }
         const action = remaining[0] || "tail";
         if (action !== "tail") {
-          throw new Error(`Unknown changelog action "${action}"`);
+          throw new InvalidArgumentError(`Unknown changelog action "${action}"`);
         }
         await commands.changelogTail(
           dbPath,
@@ -765,7 +770,7 @@ const main = async () => {
         break;
       }
       default:
-        throw new Error(`Unknown command "${command}"`);
+        throw new InvalidArgumentError(`Unknown command "${command}"`);
     }
   } catch (error) {
     stderr.write(`${error.message}\n`);

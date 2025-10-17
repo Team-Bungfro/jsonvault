@@ -12,6 +12,11 @@ const { matchFilter } = require("./query/operators");
 const IndexManager = require("./indexing/indexManager");
 const { createSchema } = require("./schema/schema");
 const { createFieldEncryption } = require("./encryption/fieldEncryption");
+const {
+  InvalidArgumentError,
+  InvalidOperationError,
+  AlreadyExistsError,
+} = require("./errors");
 
 const asyncMaybe = async (fn, payload) => {
   if (typeof fn !== "function") {
@@ -50,7 +55,10 @@ const ensureArrayField = (target, path) => {
     return getByPath(target, path);
   }
   if (!Array.isArray(current)) {
-    throw new Error(`Cannot perform array operation on non-array field "${path}"`);
+    throw new InvalidArgumentError(
+      `Cannot perform array operation on non-array field "${path}"`,
+      { path },
+    );
   }
   return current;
 };
@@ -134,7 +142,7 @@ const resolveUpsertDocument = (filter, update, explicit, primaryKey) => {
   }
 
   if (Object.keys(document).length === 0) {
-    throw new Error(
+    throw new InvalidArgumentError(
       "Unable to infer document for upsert. Provide options.upsertDocument.",
     );
   }
@@ -182,7 +190,10 @@ const applyUpdate = (doc, update, primaryKey) => {
         applyAddToSet(next, spec);
         break;
       default:
-        throw new Error(`Unsupported update operator "${operator}"`);
+        throw new InvalidArgumentError(
+          `Unsupported update operator "${operator}"`,
+          { operator },
+        );
     }
   }
 
@@ -484,8 +495,9 @@ class JsonCollection {
     const id = incoming[this._primaryKey];
 
     if (this._byId.has(id)) {
-      throw new Error(
+      throw new AlreadyExistsError(
         `Document with ${this._primaryKey} "${id}" already exists in collection "${this._name}"`,
+        { primaryKey: this._primaryKey, id, collection: this._name },
       );
     }
 
@@ -493,6 +505,8 @@ class JsonCollection {
 
     await asyncMaybe(this._runtime.validator, incoming);
     await asyncMaybe(this._runtime.hooks.beforeInsert, incoming);
+
+    await this._database._enforceWritePolicy(this._name, "insert", null, incoming);
 
     this._documents.push(incoming);
     this._byId.set(id, incoming);
@@ -569,13 +583,28 @@ class JsonCollection {
     }
 
     const results = queryDocuments(docs, filter, options);
+    const filtered = [];
+    for (const doc of results) {
+      // Enforce read policies
+      // eslint-disable-next-line no-await-in-loop
+      const allowed = await this._database._allowRead(this._name, doc);
+      if (!allowed) {
+        continue;
+      }
+      // eslint-disable-next-line no-await-in-loop
+      const redacted = await this._database._redactRow(this._name, doc);
+      if (redacted != null) {
+        filtered.push(redacted);
+      }
+    }
+
     if (plan) {
-      plan.matched = results.length;
+      plan.matched = filtered.length;
       this._lastPlan = { ...plan };
     } else {
       this._lastPlan = null;
     }
-    return results.map((doc) => cloneDeep(doc));
+    return filtered;
   }
 
   stream(filter = {}, options = {}) {
@@ -595,11 +624,11 @@ class JsonCollection {
 
   async at(index, filter = {}, options = {}) {
     if (!Number.isInteger(index)) {
-      throw new Error("Collection.at index must be an integer");
+      throw new InvalidArgumentError("Collection.at index must be an integer", { index });
     }
 
     if (index < 0) {
-      throw new Error("Collection.at does not support negative indexes");
+      throw new InvalidArgumentError("Collection.at does not support negative indexes", { index });
     }
 
     const [result] = await this.find(filter, {
@@ -612,7 +641,14 @@ class JsonCollection {
 
   async findById(id) {
     const doc = this._byId.get(id);
-    return doc ? cloneDeep(doc) : null;
+    if (!doc) {
+      return null;
+    }
+    if (!(await this._database._allowRead(this._name, doc))) {
+      return null;
+    }
+    const redacted = await this._database._redactRow(this._name, doc);
+    return redacted == null ? null : redacted;
   }
 
   async updateMany(filter, update, options = {}) {
@@ -629,7 +665,10 @@ class JsonCollection {
       const next = applyUpdate(current, update, this._primaryKey);
 
       if (next[this._primaryKey] !== id) {
-        throw new Error("Updating the primary key is not supported");
+        throw new InvalidOperationError("Updating the primary key is not supported", {
+          primaryKey: this._primaryKey,
+          collection: this._name,
+        });
       }
 
       const index = this._documents.indexOf(current);
@@ -647,6 +686,13 @@ class JsonCollection {
         next: cloneDeep(next),
         update,
       });
+
+      await this._database._enforceWritePolicy(
+        this._name,
+        "update",
+        previousSnapshot,
+        next,
+      );
 
       this._documents[index] = next;
       this._byId.set(id, next);
@@ -728,7 +774,7 @@ class JsonCollection {
 
   async replaceOne(filter, replacement) {
     if (Object.keys(replacement).some(isOperator)) {
-      throw new Error("Replacement document cannot contain update operators");
+      throw new InvalidArgumentError("Replacement document cannot contain update operators");
     }
 
     const match = await this.findOne(filter);
@@ -750,6 +796,8 @@ class JsonCollection {
       const id = match[this._primaryKey];
       const current = this._byId.get(id);
       const snapshot = cloneDeep(current);
+
+      await this._database._enforceWritePolicy(this._name, "delete", snapshot, null);
 
       await asyncMaybe(this._runtime.hooks.beforeDelete, cloneDeep(snapshot));
 
@@ -938,7 +986,9 @@ class JsonCollection {
 
     const chunkSize = Number(partitionConfig.chunkSize);
     if (!Number.isFinite(chunkSize) || chunkSize <= 0) {
-      throw new Error("partition.chunkSize must be a positive number");
+      throw new InvalidArgumentError("partition.chunkSize must be a positive number", {
+        chunkSize: partitionConfig.chunkSize,
+      });
     }
 
     const key = typeof partitionConfig.key === "string" && partitionConfig.key.length > 0
@@ -1142,8 +1192,9 @@ class JsonCollection {
     try {
       return this._encryption.decryptDocument(doc);
     } catch (error) {
-      throw new Error(
+      throw new InvalidOperationError(
         `Failed to decrypt document in collection "${this._name}": ${error.message}`,
+        { collection: this._name, cause: error },
       );
     }
   }

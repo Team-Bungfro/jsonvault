@@ -1,6 +1,7 @@
 "use strict";
 
 const { cloneDeep } = require("../utils/objectUtils");
+const { InvalidArgumentError } = require("../errors");
 
 const SUPPORTED_TYPES = new Set([
   "string",
@@ -29,7 +30,7 @@ const asRegExp = (pattern) => {
   if (typeof pattern === "string") {
     return new RegExp(pattern);
   }
-  throw new Error("Schema pattern must be a RegExp or string");
+  throw new InvalidArgumentError("Schema pattern must be a RegExp or string");
 };
 
 const normalizeRule = (rule, path) => {
@@ -38,12 +39,12 @@ const normalizeRule = (rule, path) => {
   }
 
   if (!isPlainObject(rule)) {
-    throw new Error(`Invalid schema rule at "${path}"`);
+    throw new InvalidArgumentError(`Invalid schema rule at "${path}"`);
   }
 
   const type = rule.type || "any";
   if (!SUPPORTED_TYPES.has(type)) {
-    throw new Error(`Unsupported schema type "${type}" at "${path}"`);
+    throw new InvalidArgumentError(`Unsupported schema type "${type}" at "${path}"`);
   }
 
   const normalized = {
@@ -100,7 +101,7 @@ const normalizeSchema = (definition, path = "") => {
   }
 
   if (!isPlainObject(fields)) {
-    throw new Error("Schema fields must be an object");
+    throw new InvalidArgumentError("Schema fields must be an object");
   }
 
   const normalizedFields = {};
@@ -173,7 +174,7 @@ const applyDefault = (rule, context) => {
 
 const assertCondition = (condition, path, message) => {
   if (!condition) {
-    throw new Error(`Schema violation at "${formatPath(path)}": ${message}`);
+    throw new InvalidArgumentError(`Schema violation at "${formatPath(path)}": ${message}`);
   }
 };
 

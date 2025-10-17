@@ -316,6 +316,31 @@ export interface ChangeLogOptions {
   archiveDirectory?: string;
 }
 
+export interface PolicyReadPayload<T extends Record<string, any> = Record<string, any>> {
+  row: T;
+  ctx: Record<string, any> | null;
+}
+
+export type PolicyOperation = "insert" | "update" | "delete";
+
+export interface PolicyWritePayload<T extends Record<string, any> = Record<string, any>> {
+  previous: T | null;
+  next: T | null;
+  ctx: Record<string, any> | null;
+  operation: PolicyOperation;
+}
+
+export interface PolicyRedactPayload<T extends Record<string, any> = Record<string, any>> {
+  row: T;
+  ctx: Record<string, any> | null;
+}
+
+export interface CollectionPolicy<T extends Record<string, any> = Record<string, any>> {
+  read?(payload: PolicyReadPayload<T>): boolean | Promise<boolean>;
+  write?(payload: PolicyWritePayload<T>): boolean | Promise<boolean>;
+  redact?(payload: PolicyRedactPayload<T>): T | null | Promise<T | null>;
+}
+
 export interface JsonDatabaseOptions {
   path?: string;
   autosave?: boolean;
@@ -398,6 +423,10 @@ export class JsonDatabase {
   getAppliedMigrations(): Array<{ id: string; appliedAt: string; description?: string | null }>;
   recordMigrationApplied(id: string, info?: { description?: string | null; appliedAt?: string }): Promise<void>;
   recordMigrationReverted(id: string): Promise<void>;
+  policy<T extends Record<string, any> = Record<string, any>>(collection: string, definition: CollectionPolicy<T>): void;
+  with(context: Record<string, any>): JsonDatabase;
+  get(path: string): Promise<any>;
+  getContext(): Record<string, any> | null;
 }
 
 export declare const queryDocuments: <T extends Record<string, any>>(
@@ -409,6 +438,43 @@ export declare const queryDocuments: <T extends Record<string, any>>(
 export declare const operators: {
   matchFilter<T extends Record<string, any>>(doc: T, filter?: Filter<T>): boolean;
 };
+
+export declare class JsonVaultError extends Error {
+  constructor(message?: string, details?: Record<string, any>, code?: string);
+  readonly details: Record<string, any>;
+  readonly code: string;
+  static readonly code: string;
+}
+
+export declare class InvalidArgumentError extends JsonVaultError {
+  constructor(message?: string, details?: Record<string, any>);
+  static readonly code: string;
+}
+
+export declare class InvalidOperationError extends JsonVaultError {
+  constructor(message?: string, details?: Record<string, any>);
+  static readonly code: string;
+}
+
+export declare class NotFoundError extends JsonVaultError {
+  constructor(message?: string, details?: Record<string, any>);
+  static readonly code: string;
+}
+
+export declare class AlreadyExistsError extends JsonVaultError {
+  constructor(message?: string, details?: Record<string, any>);
+  static readonly code: string;
+}
+
+export declare class QueryError extends JsonVaultError {
+  constructor(message?: string, details?: Record<string, any>);
+  static readonly code: string;
+}
+
+export declare class PolicyDeniedError extends JsonVaultError {
+  constructor(message?: string, details?: Record<string, any>);
+  static readonly code: string;
+}
 
 export default JsonDatabase;
 

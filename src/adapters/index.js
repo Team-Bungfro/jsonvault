@@ -1,6 +1,7 @@
 "use strict";
 
 const FileStorageAdapter = require("../storage/fileStorageAdapter");
+const { InvalidArgumentError, InvalidOperationError } = require("../errors");
 
 const registry = new Map();
 
@@ -12,7 +13,7 @@ const ensureYaml = () => {
     // eslint-disable-next-line global-require
     return require("yaml");
   } catch (error) {
-    throw new Error(
+    throw new InvalidOperationError(
       "YAML adapter requires the 'yaml' package. Install it with `npm install yaml`.",
     );
   }
@@ -73,10 +74,10 @@ const createMemoryAdapter = () => {
 
 const registerAdapter = (name, factory) => {
   if (!name) {
-    throw new Error("Adapter name is required");
+    throw new InvalidArgumentError("Adapter name is required");
   }
   if (typeof factory !== "function") {
-    throw new Error("Adapter factory must be a function");
+    throw new InvalidArgumentError("Adapter factory must be a function");
   }
   registry.set(name, factory);
 };
