@@ -44,7 +44,7 @@
   "author": "devbungfro",
   "repository": {
     "type": "git",
-    "url": "https://github.com/team-bungfro/jsonvault.git"
+    "url": "git+https://github.com/team-bungfro/jsonvault.git"
   },
   "devDependencies": {
     "yaml": "^2.8.1"
