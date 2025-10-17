@@ -1,0 +1,89 @@
+---
+sidebar_position: 5
+title: Policies & Access Control
+---
+
+JSONVault ships with a lightweight policy engine so you can enforce row-level access, redact sensitive fields, and reject writes without adding another service layer.
+
+## Defining a policy
+
+Attach a policy to a collection once when you boot the database:
+
+```js
+const db = await JsonDatabase.open({ path: "./data" });
+
+db.policy("orders", {
+  read({ row, ctx }) {
+    if (!ctx) return false;
+    return ctx.role === "admin" || row.userId === ctx.userId;
+  },
+  write({ previous, next, ctx, operation }) {
+    if (!ctx) return false;
+    if (ctx.role === "admin") return true;
+    if (operation === "insert") return next?.userId === ctx.userId;
+    if (operation === "update") {
+      return previous?.userId === ctx.userId && next?.userId === ctx.userId;
+    }
+    if (operation === "delete") return previous?.userId === ctx.userId;
+    return false;
+  },
+  redact({ row, ctx }) {
+    return ctx?.role === "admin" ? row : { ...row, internalNotes: undefined };
+  },
+});
+```
+
+- `read` decides whether a document should be visible. Returning `false` filters the row out.
+- `write` runs before inserts, updates, deletes, and upserts. Returning `false` throws a `PolicyDeniedError`.
+- `redact` can alter or remove fields before a document is returned to the caller.
+
+All callbacks receive the current async context (`ctx`) so you can branch on user id, role, tenant, etc.
+
+## Propagating context
+
+Use `db.with(context)` to scope subsequent operations:
+
+```js
+const adminDb = db.with({ userId: "root", role: "admin" });
+const aliceDb = db.with({ userId: "alice", role: "user" });
+
+await adminDb.collection("orders").insertOne({ userId: "alice", total: 120 });
+
+const visibleToAlice = await aliceDb.collection("orders").find();
+// => only Alice's rows, with internalNotes removed
+```
+
+The context flows through:
+
+- Collection methods (`find`, `updateOne`, `deleteMany`, etc.)
+- Compiled query streams (`db.stream(query)`)
+- SQL helper (`db.sql\`...\``)
+- Convenience helpers like `db.get("orders/o1")`
+
+Contexts nest, so calling `db.with(...)` inside another scoped block merges the objects.
+
+## Handling denied writes
+
+When a `write` policy returns `false`, JSONVault throws a `PolicyDeniedError`:
+
+```js
+const { PolicyDeniedError } = require("jsonvault");
+
+try {
+  await aliceDb.collection("orders").insertOne({ userId: "bob", total: 10 });
+} catch (error) {
+  if (error instanceof PolicyDeniedError) {
+    console.warn("Blocked by policy", error.details);
+  } else {
+    throw error;
+  }
+}
+```
+
+`error.details` includes the collection name, operation, and ctx snapshot, which is handy for audit logs.
+
+## Tips
+
+- Policies are evaluated for every matching document—keep logic fast and side-effect free.
+- Combine policies with hooks and schemas: policies decide *who* can act, hooks enforce business rules, schemas sanitize inputs.
+- Need per-request overrides? Call `db.with({...})` for each request/worker and keep the scoped database around for the duration of the operation.

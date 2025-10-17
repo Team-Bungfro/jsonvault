@@ -1,0 +1,96 @@
+---
+sidebar_position: 2
+title: Query model
+---
+
+import Tabs from '@theme/Tabs';
+import TabItem from '@theme/TabItem';
+
+JSONVault supports three complementary query surfaces:
+
+1. Mongo-like filter objects with operators such as `$and`, `$in`, `$regex`, `$all`, `$elemMatch`, `$mod`, `$type`, and nested `$not`.
+2. JSONPath expressions compiled via `db.compile("$.orders[?(@.total > 1000)]")`.
+3. A SQL helper that covers projections, joins, grouping, `HAVING`, ordering, and limiting.
+
+## Filter operators
+
+```js
+await users.find({
+  $and: [
+    { status: { $in: ["active", "pending"] } },
+    { tags: { $all: ["tech", "sale"] } },
+    { variants: { $elemMatch: { price: { $gt: 30 } } } },
+    { createdAt: { $mod: [2, 0] } },
+    { meta: { $type: ["object", "null"] } },
+  ],
+  status: { $not: { $eq: "archived" } },
+});
+```
+
+Operators compose; use nested `$not` to invert specific comparisons without rewiring the whole filter.
+
+## JSONPath
+
+When you need ad-hoc traversal logic, compile a JSONPath string and stream the results:
+
+```js
+const query = db.compile("$.orders[?(@.total > 1000 && @.status == 'complete')]");
+
+for await (const order of db.stream(query)) {
+  console.log(order.id, order.total);
+}
+```
+
+## SQL helper
+
+<Tabs groupId="sql-examples">
+  <TabItem value="select" label="Select">
+
+```js
+const totals = await db.sql`
+  SELECT userId, SUM(total) AS totalSpent
+  FROM orders
+  WHERE status = 'paid'
+  GROUP BY userId
+  HAVING totalSpent > 1000
+  ORDER BY totalSpent DESC
+  LIMIT 10
+`;
+```
+
+  </TabItem>
+  <TabItem value="join" label="Join">
+
+```js
+const rows = await db.sql`
+  SELECT orders.id AS orderId,
+         orders.total,
+         users.email
+  FROM orders
+  JOIN users ON orders.userId = users._id
+  WHERE orders.total > 500
+  ORDER BY orderId
+`;
+```
+
+  </TabItem>
+  <TabItem value="jsonpath" label="JSONPath passthrough">
+
+```js
+const expensive = await db.sql("$.orders[?(@.total > 1000)]");
+```
+
+  </TabItem>
+</Tabs>
+
+### SQL feature checklist
+
+- `SELECT` columns with aliases.
+- Aggregates: `SUM`, `AVG`, `MIN`, `MAX`, `COUNT`.
+- `WHERE`, `BETWEEN`, `IN`, `IS NULL`, boolean logic (`AND`/`OR`).
+- Multiple `JOIN`s (including `LEFT JOIN`) on equality (`JOIN users ON orders.userId = users._id`).
+- `GROUP BY`, `HAVING`, `ORDER BY`, `LIMIT`.
+- Sub-selects in `FROM` clauses, `LIMIT ... OFFSET ...` pagination, and `ORDER BY` alias support.
+- `COUNT(*) OVER()` to attach total row counts for paginated responses.
+- Template parameters (`${value}`) keep user input safe.
+- Policies defined with `db.policy()` automatically inject additional filters and redact result rows, even for SQL queries.
