@@ -19,6 +19,42 @@ const log = (label, value, unit = "ms") => {
   );
 };
 
+const PARAM_MARKER = "__jsonvault_param_";
+
+const buildInsertStatement = (docs) => {
+  const params = [];
+  const tupleFor = (value) => {
+    const marker = `${PARAM_MARKER}${params.length}__`;
+    params.push(value);
+    return marker;
+  };
+
+  const tuples = docs.map((doc) => {
+    const parts = [
+      tupleFor(doc.name),
+      tupleFor(doc.email),
+      tupleFor(doc.age),
+      tupleFor(doc.tags),
+      tupleFor(doc.active ?? false),
+    ];
+    return `(${parts.join(", ")})`;
+  });
+
+  const sql = `INSERT INTO sql_users (name, email, age, tags, active) VALUES ${tuples.join(", ")}`;
+  return { sql, params };
+};
+
+const executeSqlInsert = async (db, docs, chunkSize = 250) => {
+  let inserted = 0;
+  for (let offset = 0; offset < docs.length; offset += chunkSize) {
+    const chunk = docs.slice(offset, offset + chunkSize);
+    const { sql, params } = buildInsertStatement(chunk);
+    const result = await db.sql(sql, params);
+    inserted += result.insertedCount || 0;
+  }
+  return inserted;
+};
+
 const createTempPath = async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "jsonvault-bench-"));
   return dir;
@@ -118,6 +154,37 @@ const main = async () => {
   const updateDuration = now() - start;
   log("updateMany", updateDuration);
 
+  const sqlSampleSize = Math.min(1_000, payload.length);
+  const sqlDocs = payload.slice(0, sqlSampleSize).map((doc, index) => ({
+    name: `SQL User ${index}`,
+    email: `sql-user${index}@example.com`,
+    age: doc.age,
+    tags: doc.tags,
+    active: false,
+  }));
+
+  start = now();
+  const sqlInserted = await executeSqlInsert(db, sqlDocs);
+  const sqlInsertDuration = now() - start;
+  log("sql INSERT", sqlInsertDuration);
+
+  start = now();
+  const sqlUpdateResult = await db.sql`
+    UPDATE sql_users
+    SET active = TRUE
+    WHERE age >= ${40}
+  `;
+  const sqlUpdateDuration = now() - start;
+  log("sql UPDATE", sqlUpdateDuration);
+
+  start = now();
+  const sqlDeleteResult = await db.sql`
+    DELETE FROM sql_users
+    WHERE age < ${20}
+  `;
+  const sqlDeleteDuration = now() - start;
+  log("sql DELETE", sqlDeleteDuration);
+
   const compiledFilter = db.compile({
     collection: "users",
     filter: { age: { $gte: 40, $lt: 80 } },
@@ -154,6 +221,11 @@ const main = async () => {
   console.log("count:", count);
   console.log("stream(filter) count:", streamCount);
   console.log("stream(expression) count:", exprCount);
+  console.log("sql insert total:", sqlInserted);
+  console.log("sql update result:", sqlUpdateResult);
+  console.log("sql delete result:", sqlDeleteResult);
+  const sqlUsersSample = await db.collection("sql_users").find({}, { limit: 3, projection: { name: 1, active: 1 } });
+  console.log("sql sample:", sqlUsersSample);
 
   await db.close();
   await fs.rm(TEMP_PATH, { recursive: true, force: true });

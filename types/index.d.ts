@@ -381,6 +381,35 @@ export interface CompiledQuery<T extends Record<string, any> = Record<string, an
   explain?(db: JsonDatabase): PartitionPlan | null;
 }
 
+export interface SqlInsertResult<TDocument = Record<string, any>> {
+  operation: "insert";
+  acknowledged: boolean;
+  insertedCount: number;
+  insertedIds: any[];
+  documents: TDocument[];
+}
+
+export interface SqlUpdateResult {
+  operation: "update";
+  acknowledged: boolean;
+  matchedCount: number;
+  modifiedCount: number;
+  upsertedId: any | null;
+}
+
+export interface SqlDeleteResult {
+  operation: "delete";
+  acknowledged: boolean;
+  deletedCount: number;
+}
+
+export type SqlWriteResult<TDocument = Record<string, any>> =
+  | SqlInsertResult<TDocument>
+  | SqlUpdateResult
+  | SqlDeleteResult;
+
+export type SqlResult<TResult = any> = TResult[] | SqlWriteResult;
+
 export class FileStorageAdapter implements StorageAdapter {
   constructor(options?: { directory?: string; backupDir?: string });
   init(): Promise<void>;
@@ -416,7 +445,8 @@ export class JsonDatabase {
   restore(snapshot: DatabaseSnapshot): Promise<void>;
   compile<T extends Record<string, any> = Record<string, any>>(input: string | CompileSpec<T>): CompiledQuery<T>;
   stream<T extends Record<string, any> = Record<string, any>>(query: CompiledQuery<T>, options?: QueryOptions<T>): AsyncIterable<T>;
-  sql<TResult = any>(strings: TemplateStringsArray | string, ...values: any[]): Promise<TResult[]>;
+  sql<TResult = any>(strings: TemplateStringsArray | string, ...values: any[]): Promise<SqlResult<TResult>>;
+  sqlBatch<TResult = any>(strings: TemplateStringsArray | string, ...values: any[]): Promise<Array<SqlResult<TResult>>>;
   transaction<R>(callback: (db: JsonDatabase) => R | Promise<R>): Promise<R>;
   stats(): Promise<DatabaseStats>;
   close(): Promise<void>;

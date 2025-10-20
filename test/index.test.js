@@ -487,6 +487,157 @@ test("db.sql executes aggregate queries", async () => {
   await db.close();
 });
 
+test("db.sql supports INSERT statements", async () => {
+  const tempDir = await createTempDir();
+  const db = await JsonDatabase.open({ path: tempDir, autosave: false });
+
+  const inserted = await db.sql`
+    INSERT INTO users (name, email, active, profile.lastLogin)
+    VALUES (${"Ada"}, ${"ada@example.com"}, TRUE, ${new Date("2024-01-01T00:00:00.000Z")}),
+           (${"Grace"}, ${"grace@example.com"}, FALSE, NULL)
+  `;
+
+  assert.equal(inserted.operation, "insert");
+  assert.equal(inserted.insertedCount, 2);
+  assert.equal(inserted.documents.length, 2);
+  assert.equal(inserted.documents[0].name, "Ada");
+  assert.equal(inserted.documents[1].active, false);
+  assert.equal(inserted.insertedIds.length, 2);
+
+  const users = db.collection("users");
+  const stored = await users.find({}, { projection: null });
+  stored.sort((a, b) => a.name.localeCompare(b.name));
+  assert.equal(stored.length, 2);
+  assert.equal(stored[0].profile.lastLogin instanceof Date, true);
+
+  const objectInsert = await db.sql`
+    INSERT INTO users VALUES (${ { name: "Edsger", email: "edsger@example.com" } })
+  `;
+
+  assert.equal(objectInsert.insertedCount, 1);
+  assert.equal(objectInsert.documents[0].name, "Edsger");
+
+  await db.close();
+});
+
+test("db.sql supports UPDATE statements", async () => {
+  const tempDir = await createTempDir();
+  const db = await JsonDatabase.open({ path: tempDir, autosave: false });
+  const users = db.collection("users");
+
+  await users.insertMany([
+    { _id: "ada", email: "ada@example.com", status: "pending" },
+    { _id: "grace", email: "grace@example.com", status: "pending" },
+  ]);
+
+  const updated = await db.sql`
+    UPDATE users
+    SET status = 'active', metrics.lastSeen = ${new Date("2024-01-05T12:00:00.000Z")}
+    WHERE email = ${"ada@example.com"}
+  `;
+
+  assert.equal(updated.operation, "update");
+  assert.equal(updated.matchedCount, 1);
+  assert.equal(updated.modifiedCount, 1);
+
+  const ada = await users.findOne({ _id: "ada" });
+  assert.equal(ada.status, "active");
+  assert.equal(ada.metrics.lastSeen instanceof Date, true);
+
+  const bulkUpdate = await db.sql`
+    UPDATE users
+    SET status = 'archived'
+  `;
+
+  assert.equal(bulkUpdate.matchedCount, 2);
+  assert.equal(bulkUpdate.modifiedCount, 2);
+
+  const all = await users.find({}, { projection: null });
+  assert.ok(all.every((doc) => doc.status === "archived"));
+
+  await assert.rejects(
+    () =>
+      db.sql`
+        UPDATE missing_collection
+        SET status = 'noop'
+      `,
+    /does not exist/,
+  );
+
+  await db.close();
+});
+
+test("db.sql supports DELETE statements", async () => {
+  const tempDir = await createTempDir();
+  const db = await JsonDatabase.open({ path: tempDir, autosave: false });
+  const users = db.collection("users");
+
+  await users.insertMany([
+    { _id: "ada", status: "active" },
+    { _id: "grace", status: "pending" },
+    { _id: "charles", status: "pending" },
+  ]);
+
+  const deleteResult = await db.sql`
+    DELETE FROM users
+    WHERE status = ${"pending"}
+  `;
+
+  assert.equal(deleteResult.operation, "delete");
+  assert.equal(deleteResult.deletedCount, 2);
+
+  const remaining = await users.find({}, { projection: null });
+  assert.equal(remaining.length, 1);
+  assert.equal(remaining[0]._id, "ada");
+
+  await assert.rejects(
+    () =>
+      db.sql`
+        DELETE FROM missing
+      `,
+    /does not exist/,
+  );
+
+  await db.close();
+});
+
+test("db.sqlBatch executes statements transactionally", async () => {
+  const tempDir = await createTempDir();
+  const db = await JsonDatabase.open({ path: tempDir, autosave: false });
+
+  await db.collection("users").insertMany([
+    { _id: "base", email: "base@example.com", active: false },
+  ]);
+
+  const results = await db.sqlBatch`
+    INSERT INTO users (name, email, active) VALUES (${"Ada"}, ${"ada@example.com"}, TRUE);
+    UPDATE users SET active = TRUE WHERE email = ${"base@example.com"};
+    SELECT users.email, users.active FROM users WHERE active = TRUE ORDER BY email;
+  `;
+
+  assert.equal(results.length, 3);
+  assert.equal(results[0].operation, "insert");
+  assert.equal(results[0].insertedCount, 1);
+  assert.equal(results[1].operation, "update");
+  assert.equal(results[1].matchedCount, 1);
+  assert.equal(Array.isArray(results[2]), true);
+  assert.equal(results[2].length, 2);
+
+  await assert.rejects(
+    () =>
+      db.sqlBatch`
+        INSERT INTO users (name, email) VALUES (${"Grace"}, ${"grace@example.com"});
+        UPDATE missing_collection SET active = TRUE;
+      `,
+  );
+
+  const afterFailure = await db.collection("users").find({}, { projection: null, sort: { email: 1 } });
+  assert.equal(afterFailure.length, 2);
+  assert.equal(afterFailure.some((doc) => doc.email === "grace@example.com"), false);
+
+  await db.close();
+});
+
 test("db.sql supports JOIN queries", async () => {
   const tempDir = await createTempDir();
   const db = await JsonDatabase.open({ path: tempDir, autosave: false });
