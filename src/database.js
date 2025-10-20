@@ -10,7 +10,7 @@ const { getAdapter } = require("./adapters");
 const { compileQuery } = require("./query/compiler");
 const debounce = require("./utils/debounce");
 const { cloneDeep } = require("./utils/objectUtils");
-const { runSql } = require("./sql/sqlEngine");
+const { runSql, runSqlBatch } = require("./sql/sqlEngine");
 const FileChangeLog = require("./changelog/fileChangeLog");
 const {
   PolicyDeniedError,
@@ -760,6 +760,10 @@ class JsonDatabase {
 
   sql(strings, ...values) {
     return runSql(this, strings, ...values);
+  }
+
+  sqlBatch(strings, ...values) {
+    return this.transaction((db) => runSqlBatch(db, strings, ...values));
   }
 
   async transaction(callback) {

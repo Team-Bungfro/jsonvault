@@ -160,6 +160,23 @@ const ordersWithEmail = await db.sql`
   ORDER BY orderId
 `;
 // [{ orderId: "o1", users: { email: "alice@example.com" } }, ...]
+
+const insertResult = await db.sql`
+  INSERT INTO users (name, email, active)
+  VALUES (${"Ada"}, ${"ada@example.com"}, TRUE)
+`;
+
+await db.sql`
+  UPDATE users
+  SET active = FALSE, metrics.lastSeen = ${new Date()}
+  WHERE email = ${"ada@example.com"}
+`;
+
+const batchResults = await db.sqlBatch`
+  INSERT INTO users (name, email) VALUES (${"Grace"}, ${"grace@example.com"});
+  UPDATE users SET active = TRUE WHERE email = ${"grace@example.com"};
+  SELECT email, active FROM users WHERE email = ${"grace@example.com"};
+`;
 ```
 
 Supported today:
@@ -169,6 +186,8 @@ Supported today:
 - Multiple `JOIN`s (including `LEFT JOIN`) with table aliases; `GROUP BY`, `HAVING`, `ORDER BY`
 - Sub-selects in `FROM` clauses: `FROM (SELECT ...) AS alias`
 - Pagination helpers: `LIMIT`, `OFFSET`, `COUNT(*) OVER()` for total counts
+- Safe `INSERT ... VALUES` helpers (column list or single object) and `$set`-style `UPDATE` statements with rich metadata
+- Atomic batching with `db.sqlBatch\`\`` for running multi-statement scripts transactionally
 - Template parameters (`${value}`) and JSONPath passthrough (`db.sql("$.orders[?(@.total > 1000)]")`)
 
 ### Compiled Queries & Streaming

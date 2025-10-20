@@ -352,6 +352,125 @@ const splitOnComma = (input) => {
   return parts;
 };
 
+const normalizeIdentifier = (input) => {
+  if (typeof input !== "string") {
+    throw new QueryError("Identifier must be a string");
+  }
+
+  const trimmed = input.trim();
+  if (!trimmed) {
+    throw new QueryError("Identifier cannot be empty");
+  }
+
+  if (
+    (trimmed.startsWith("`") && trimmed.endsWith("`")) ||
+    (trimmed.startsWith("\"") && trimmed.endsWith("\""))
+  ) {
+    if (trimmed.length <= 2) {
+      throw new QueryError("Identifier cannot be empty");
+    }
+    return trimmed.slice(1, -1);
+  }
+
+  return trimmed;
+};
+
+const splitValuesTuples = (input) => {
+  const tuples = [];
+  let index = 0;
+
+  while (index < input.length) {
+    while (index < input.length && /\s/.test(input[index])) {
+      index += 1;
+    }
+
+    if (index >= input.length) {
+      break;
+    }
+
+    if (input[index] !== "(") {
+      throw new QueryError("VALUES clause must contain parenthesized tuples");
+    }
+
+    const closing = findMatchingParen(input, index);
+    if (closing === -1) {
+      throw new QueryError("VALUES tuple is missing closing parenthesis");
+    }
+
+    const inner = input.slice(index + 1, closing);
+    tuples.push(inner);
+    index = closing + 1;
+
+    while (index < input.length && /\s/.test(input[index])) {
+      index += 1;
+    }
+
+    if (index >= input.length) {
+      break;
+    }
+
+    if (input[index] !== ",") {
+      throw new QueryError("VALUES tuples must be separated by commas");
+    }
+
+    index += 1;
+
+    while (index < input.length && /\s/.test(input[index])) {
+      index += 1;
+    }
+
+    if (index >= input.length) {
+      throw new QueryError("VALUES clause has a trailing comma");
+    }
+  }
+
+  if (tuples.length === 0) {
+    throw new QueryError("VALUES clause must include at least one tuple");
+  }
+
+  return tuples;
+};
+
+const parseValuesTuple = (input, params) => {
+  const tokens = tokenize(input);
+  if (tokens.length === 0) {
+    throw new QueryError("VALUES tuple cannot be empty");
+  }
+
+  const values = [];
+  let cursor = 0;
+
+  while (cursor < tokens.length) {
+    const token = tokens[cursor];
+    if (!token) {
+      break;
+    }
+
+    if (token.type === ",") {
+      cursor += 1;
+      continue;
+    }
+
+    if (token.type === "identifier") {
+      throw new QueryError("INSERT/UPDATE values must be literals or parameters");
+    }
+
+    const { value, index } = readValueToken(tokens, cursor, params);
+    values.push(cloneDeep(value));
+    cursor = index;
+
+    const separator = tokens[cursor];
+    if (separator) {
+      if (separator.type !== ",") {
+        throw new QueryError("Values must be separated by commas");
+      }
+      cursor += 1;
+    }
+  }
+
+  return values;
+};
+
 const classifyBuffer = (buffer) => {
   if (!buffer) {
     return null;
@@ -976,12 +1095,59 @@ const normalizeSqlInput = (strings, values) => {
   return { sql, params };
 };
 
+const splitSqlStatements = (sql) => {
+  const statements = [];
+  let start = 0;
+  let depth = 0;
+  let quote = null;
+
+  for (let i = 0; i < sql.length; i += 1) {
+    const char = sql[i];
+    if (quote) {
+      if (char === quote && sql[i - 1] !== "\\") {
+        quote = null;
+      }
+      continue;
+    }
+
+    if (char === "'" || char === "\"") {
+      quote = char;
+      continue;
+    }
+
+    if (char === "(") {
+      depth += 1;
+      continue;
+    }
+
+    if (char === ")") {
+      depth = Math.max(0, depth - 1);
+      continue;
+    }
+
+    if (char === ";" && depth === 0) {
+      const fragment = sql.slice(start, i).trim();
+      if (fragment) {
+        statements.push(fragment);
+      }
+      start = i + 1;
+    }
+  }
+
+  const tail = sql.slice(start).trim();
+  if (tail) {
+    statements.push(tail);
+  }
+
+  return statements;
+};
+
 const parseSqlStatement = (sql, params) => {
   const trimmed = sql.trim().replace(/;$/, "");
   const upper = trimmed.toUpperCase();
 
   if (!upper.startsWith("SELECT ")) {
-    throw new QueryError("Only SELECT statements are supported");
+    throw new QueryError("SQL helper supports SELECT, INSERT, UPDATE, and DELETE statements");
   }
 
   const fromRegex = /\sFROM\s|\sFROM\(/i;
@@ -1160,6 +1326,201 @@ const parseSqlStatement = (sql, params) => {
     orderBy,
     limit,
     offset,
+  };
+};
+
+const parseInsertStatement = (sql, params) => {
+  const trimmed = sql.trim().replace(/;$/, "");
+  const match = trimmed.match(/^INSERT\s+INTO\s+([A-Za-z_][A-Za-z0-9_]*)\s*/i);
+  if (!match) {
+    throw new QueryError("Invalid INSERT statement");
+  }
+
+  const collection = normalizeIdentifier(match[1]);
+  let remainder = trimmed.slice(match[0].length).trim();
+
+  let columns = null;
+  if (remainder.startsWith("(")) {
+    const closing = findMatchingParen(remainder, 0);
+    if (closing === -1) {
+      throw new QueryError("Column list is missing closing parenthesis");
+    }
+    const columnPart = remainder.slice(1, closing);
+    const entries = splitOnComma(columnPart);
+    if (entries.length === 0) {
+      throw new QueryError("INSERT column list cannot be empty");
+    }
+    columns = entries.map((entry) => normalizeIdentifier(entry));
+    remainder = remainder.slice(closing + 1).trim();
+  }
+
+  if (!/^VALUES\b/i.test(remainder)) {
+    throw new QueryError("INSERT statements must use VALUES");
+  }
+
+  remainder = remainder.replace(/^VALUES\b/i, "").trim();
+  if (!remainder) {
+    throw new QueryError("VALUES clause cannot be empty");
+  }
+
+  const tuples = splitValuesTuples(remainder);
+  const values = tuples.map((tuple) => parseValuesTuple(tuple, params));
+
+  if (columns) {
+    const documents = values.map((row) => {
+      if (row.length !== columns.length) {
+        throw new QueryError("VALUES count does not match column list");
+      }
+      const doc = {};
+      columns.forEach((column, index) => {
+        setByPath(doc, column, cloneDeep(row[index]));
+      });
+      return doc;
+    });
+    return {
+      type: "insert",
+      collection,
+      documents,
+    };
+  }
+
+  const documents = values.map((row) => {
+    if (row.length !== 1) {
+      throw new QueryError("INSERT without column list requires object values");
+    }
+    const [entry] = row;
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+      throw new QueryError("INSERT value must be an object when columns are not specified");
+    }
+    return cloneDeep(entry);
+  });
+
+  return {
+    type: "insert",
+    collection,
+    documents,
+  };
+};
+
+const parseAssignmentSegment = (segment, params) => {
+  const tokens = tokenize(segment);
+  if (tokens.length === 0) {
+    throw new QueryError("SET assignment cannot be empty");
+  }
+
+  const fieldToken = tokens[0];
+  if (fieldToken.type !== "identifier") {
+    throw new QueryError("SET clause must assign to a field");
+  }
+  const field = normalizeIdentifier(fieldToken.value);
+
+  const operator = tokens[1];
+  if (!operator || operator.type !== "operator" || operator.value !== "=") {
+    throw new QueryError("SET assignments must use '='");
+  }
+
+  if (tokens.length <= 2) {
+    throw new QueryError("SET assignment is missing a value");
+  }
+
+  const valueToken = tokens[2];
+  if (valueToken.type === "identifier") {
+    throw new QueryError("SET values must be literals or parameters");
+  }
+
+  const { value, index } = readValueToken(tokens, 2, params);
+  if (index < tokens.length) {
+    const remaining = tokens.slice(index).map((token) => token.value || token.type);
+    throw new QueryError(`Unexpected tokens after assignment: ${remaining.join(" ")}`);
+  }
+
+  return {
+    field,
+    value: cloneDeep(value),
+  };
+};
+
+const parseUpdateStatement = (sql, params) => {
+  const trimmed = sql.trim().replace(/;$/, "");
+  const match = trimmed.match(/^UPDATE\s+([A-Za-z_][A-Za-z0-9_]*)\s+SET\s+/i);
+  if (!match) {
+    throw new QueryError("Invalid UPDATE statement");
+  }
+
+  const collection = normalizeIdentifier(match[1]);
+  const afterSet = trimmed.slice(match[0].length);
+
+  if (!afterSet) {
+    throw new QueryError("UPDATE statement must include SET assignments");
+  }
+
+  const whereSplit = splitOnKeywordOutsideParens(afterSet, "WHERE");
+  const setPart = (whereSplit ? whereSplit.left : afterSet).trim();
+  const wherePart = whereSplit ? whereSplit.right.trim() : null;
+
+  if (!setPart) {
+    throw new QueryError("UPDATE statement must include SET assignments");
+  }
+
+  const segments = splitOnComma(setPart);
+  if (segments.length === 0) {
+    throw new QueryError("SET assignments cannot be empty");
+  }
+
+  const assignments = {};
+  for (const segment of segments) {
+    const result = withClause("SET", segment, () => parseAssignmentSegment(segment, params));
+    if (Object.prototype.hasOwnProperty.call(assignments, result.field)) {
+      throw new QueryError(`Field "${result.field}" assigned multiple times`);
+    }
+    assignments[result.field] = result.value;
+  }
+
+  if (Object.keys(assignments).length === 0) {
+    throw new QueryError("UPDATE requires at least one assignment");
+  }
+
+  const filter = wherePart
+    ? withClause("WHERE", wherePart, () => parseWhere(wherePart, params))
+    : null;
+
+  return {
+    type: "update",
+    collection,
+    assignments,
+    filter,
+  };
+};
+
+const parseDeleteStatement = (sql, params) => {
+  const trimmed = sql.trim().replace(/;$/, "");
+  const match = trimmed.match(/^DELETE\s+FROM\s+([A-Za-z_][A-Za-z0-9_]*)\s*/i);
+  if (!match) {
+    throw new QueryError("Invalid DELETE statement");
+  }
+
+  const collection = normalizeIdentifier(match[1]);
+  const remainder = trimmed.slice(match[0].length).trim();
+
+  let filter = null;
+
+  if (!remainder) {
+    filter = null;
+  } else {
+    const whereSplit = splitOnKeywordOutsideParens(remainder, "WHERE");
+    if (!whereSplit || whereSplit.left) {
+      throw new QueryError("DELETE syntax supports only 'DELETE FROM <collection> WHERE <predicate>'");
+    }
+    if (!whereSplit.right) {
+      throw new QueryError("DELETE statement requires a WHERE predicate or omit WHERE entirely");
+    }
+    filter = withClause("WHERE", whereSplit.right, () => parseWhere(whereSplit.right, params));
+  }
+
+  return {
+    type: "delete",
+    collection,
+    filter,
   };
 };
 
@@ -1519,6 +1880,63 @@ const executeSqlSpec = async (db, spec) => {
   return rows;
 };
 
+const executeInsertSpec = async (db, spec) => {
+  const collection = db.collection(spec.collection);
+  const inserted = await collection.insertMany(spec.documents);
+  const primaryKey = collection.primaryKey;
+
+  return {
+    operation: "insert",
+    acknowledged: true,
+    insertedCount: inserted.length,
+    insertedIds: inserted.map((doc) => doc[primaryKey]),
+    documents: inserted,
+  };
+};
+
+const executeUpdateSpec = async (db, spec) => {
+  const existing = db.listCollections();
+  if (!existing.includes(spec.collection)) {
+    throw new QueryError(`Collection "${spec.collection}" does not exist`);
+  }
+
+  const collection = db.collection(spec.collection);
+  const update = { $set: {} };
+  for (const [field, value] of Object.entries(spec.assignments)) {
+    update.$set[field] = cloneDeep(value);
+  }
+
+  const filter = spec.filter || {};
+  const result = await collection.updateMany(filter, update);
+
+  return {
+    operation: "update",
+    acknowledged: true,
+    matchedCount: result.matchedCount,
+    modifiedCount: result.modifiedCount,
+    upsertedId: Object.prototype.hasOwnProperty.call(result, "upsertedId")
+      ? result.upsertedId
+      : null,
+  };
+};
+
+const executeDeleteSpec = async (db, spec) => {
+  const existing = db.listCollections();
+  if (!existing.includes(spec.collection)) {
+    throw new QueryError(`Collection "${spec.collection}" does not exist`);
+  }
+
+  const collection = db.collection(spec.collection);
+  const filter = spec.filter || {};
+  const result = await collection.deleteMany(filter);
+
+  return {
+    operation: "delete",
+    acknowledged: true,
+    deletedCount: result.deletedCount,
+  };
+};
+
 const runSql = async (db, input, ...values) => {
   const { sql, params } = normalizeSqlInput(input, values);
   const trimmed = sql.trim();
@@ -1537,6 +1955,35 @@ const runSql = async (db, input, ...values) => {
   }
 
   let spec;
+  const upper = trimmed.toUpperCase();
+
+  if (upper.startsWith("INSERT ")) {
+    try {
+      spec = parseInsertStatement(trimmed, params);
+    } catch (error) {
+      throw wrapSqlError(error, "INSERT", trimmed);
+    }
+    return executeInsertSpec(db, spec);
+  }
+
+  if (upper.startsWith("UPDATE ")) {
+    try {
+      spec = parseUpdateStatement(trimmed, params);
+    } catch (error) {
+      throw wrapSqlError(error, "UPDATE", trimmed);
+    }
+    return executeUpdateSpec(db, spec);
+  }
+
+  if (upper.startsWith("DELETE ")) {
+    try {
+      spec = parseDeleteStatement(trimmed, params);
+    } catch (error) {
+      throw wrapSqlError(error, "DELETE", trimmed);
+    }
+    return executeDeleteSpec(db, spec);
+  }
+
   try {
     spec = parseSqlStatement(trimmed, params);
   } catch (error) {
@@ -1545,12 +1992,50 @@ const runSql = async (db, input, ...values) => {
   return executeSqlSpec(db, spec);
 };
 
+const runSqlBatch = async (db, input, ...values) => {
+  const { sql, params } = normalizeSqlInput(input, values);
+  const statements = Array.isArray(sql) ? sql : splitSqlStatements(sql);
+  if (!statements || statements.length === 0) {
+    return [];
+  }
+
+  const results = [];
+  const markerRegex = new RegExp(`${PARAM_MARKER}(\\d+)__`, "g");
+
+  for (const statement of statements) {
+    const indexMap = new Map();
+    const remappedParams = [];
+    const rewritten = statement.replace(markerRegex, (match, indexStr) => {
+      const originalIndex = Number(indexStr);
+      if (!Number.isFinite(originalIndex) || originalIndex < 0 || originalIndex >= params.length) {
+        throw new QueryError("SQL parameter index out of bounds in batch execution");
+      }
+
+      if (!indexMap.has(originalIndex)) {
+        const newIndex = indexMap.size;
+        indexMap.set(originalIndex, newIndex);
+        remappedParams[newIndex] = params[originalIndex];
+      }
+
+      const newIndex = indexMap.get(originalIndex);
+      return `${PARAM_MARKER}${newIndex}__`;
+    });
+
+    const result = await runSql(db, rewritten, ...remappedParams);
+    results.push(result);
+  }
+
+  return results;
+};
+
 module.exports = {
   runSql,
+  runSqlBatch,
   _internal: {
     normalizeSqlInput,
     parseSqlStatement,
     parseWhere,
     tokenize,
+    splitSqlStatements,
   },
 };
